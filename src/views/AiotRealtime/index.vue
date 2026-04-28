@@ -28,7 +28,7 @@ interface LogEntry {
   summary: string
 }
 
-const WS_URL = 'ws://localhost:8080/ws/stream'
+const WS_URL = (import.meta.env.VITE_STREAM_WS_URL as string) || 'ws://172.18.7.124:8080/ws/stream'
 const RECONNECT_INTERVAL = 5000
 const MAX_LOG_COUNT = 200
 

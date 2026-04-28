@@ -153,7 +153,7 @@ const rewriteLegacyPhpRoute = (url?: string, method?: string, params?: any) => {
 }
 
 const service: AxiosInstance = axios.create({
-  baseURL: 'http://localhost:80',
+  baseURL: '/',
   timeout: 10000
 })
 

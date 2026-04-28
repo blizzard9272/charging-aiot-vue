@@ -647,6 +647,12 @@ const linkedVectorPayload = (packet: WorkbenchLinkedPacket | null) => {
   }, 0)
 }
 
+const recognitionFirstVectorHex = (packet: WorkbenchLinkedPacket | null) => {
+  if (!packet || packet.records102.length <= 0) return '--'
+  const details = packet.records102[0].details as StreamRecord102Details
+  return details.vector_hex_preview || details.vector_payload_hex_preview || '--'
+}
+
 const recognitionPackets = computed(() => {
   return recognitionPacketsAll.value.slice(0, 14)
 })
@@ -792,10 +798,10 @@ onUnmounted(() => {
     <el-card class="connection-card" shadow="hover">
       <div class="connection-main">
         <div class="left-wrap">
-          <div class="connection-title">瀹炴椂灞曠ず锛圵ebSocket 瀹炴椂鎺ㄩ€侊級</div>
+          <div class="connection-title">实时展示（WebSocket 实时推送）</div>
           <div class="sub-text">
-            鏈€鍚庢帹閫侊細{{ lastPushTime ? formatTime(lastPushTime) : '--' }}
-            <span v-if="wsTryUrl"> | 灏濊瘯杩炴帴锛歿{ wsTryUrl }}</span>
+            最后推送：{{ lastPushTime ? formatTime(lastPushTime) : '--' }}
+            <span v-if="wsTryUrl"> | 尝试连接：{{ wsTryUrl }}</span>
             <span v-if="connectError" class="error-text"> | {{ connectError }}</span>
           </div>
         </div>
@@ -803,9 +809,9 @@ onUnmounted(() => {
         <div class="right-wrap">
           <el-input v-model="wsUrl" class="ws-input" placeholder="ws://localhost:8080/ws/stream" />
           <el-tag :type="statusTagType">{{ statusText }}</el-tag>
-          <el-button type="primary" @click="reconnectNow">杩炴帴</el-button>
-          <el-button @click="disconnectNow">鏂紑</el-button>
-          <!-- <el-button type="success" @click="loadSnapshotOnce">鍒锋柊蹇収</el-button> -->
+          <el-button type="primary" @click="reconnectNow">连接</el-button>
+          <el-button @click="disconnectNow">断开</el-button>
+          <!-- <el-button type="success" @click="loadSnapshotOnce">刷新快照</el-button> -->
         </div>
       </div>
     </el-card>
@@ -815,7 +821,7 @@ onUnmounted(() => {
         <div class="summary-box summary-a">
           <div class="summary-icon"><el-icon><Camera /></el-icon></div>
           <div>
-            <div class="summary-title">娲昏穬璁惧鏁?/div>
+            <div class="summary-title">活跃设备数</div>
             <div class="summary-value">{{ stats.onlineDeviceCount }}</div>
           </div>
         </div>
@@ -824,7 +830,7 @@ onUnmounted(() => {
         <div class="summary-box summary-b">
           <div class="summary-icon"><el-icon><UserFilled /></el-icon></div>
           <div>
-            <div class="summary-title">褰撳墠鐩爣鎬绘暟</div>
+            <div class="summary-title">当前目标总数</div>
             <div class="summary-value">{{ stats.currentTotalPeople }}</div>
           </div>
         </div>
@@ -833,7 +839,7 @@ onUnmounted(() => {
         <div class="summary-box summary-c">
           <div class="summary-icon"><el-icon><PictureFilled /></el-icon></div>
           <div>
-            <div class="summary-title">浠婃棩鎶撴媿 (103)</div>
+            <div class="summary-title">今日抓拍 (103)</div>
             <div class="summary-value">{{ stats.todayCaptureCount }}</div>
           </div>
         </div>
@@ -842,7 +848,7 @@ onUnmounted(() => {
         <div class="summary-box summary-d">
           <div class="summary-icon"><el-icon><Link /></el-icon></div>
           <div>
-            <div class="summary-title">浠婃棩璇嗗埆 (102)</div>
+            <div class="summary-title">今日识别 (102)</div>
             <div class="summary-value">{{ stats.todayRecognizedCount }}</div>
           </div>
         </div>
@@ -851,7 +857,7 @@ onUnmounted(() => {
         <div class="summary-box summary-e">
           <div class="summary-icon"><el-icon><Link /></el-icon></div>
           <div>
-            <div class="summary-title">鎬昏褰曟暟</div>
+            <div class="summary-title">总记录数</div>
             <div class="summary-value">{{ stats.totalRecords }}</div>
           </div>
         </div>
@@ -860,7 +866,7 @@ onUnmounted(() => {
         <div class="summary-box summary-f">
           <div class="summary-icon"><el-icon><Link /></el-icon></div>
           <div>
-            <div class="summary-title">瀹屾暣鍏宠仈浜嬩欢</div>
+            <div class="summary-title">完整关联事件</div>
             <div class="summary-value">{{ stats.fullLinkedCount }}</div>
           </div>
         </div>
@@ -868,12 +874,12 @@ onUnmounted(() => {
     </el-row>
 
     <div class="summary-progress-card">
-      <div class="panel-title">涓夊崗璁€讳綋鏁伴噺杩涘害</div>
+      <div class="panel-title">三协议总体数量进度</div>
       <div class="progress-list">
         <div v-for="item in protocolProgressItems" :key="item.label" class="progress-item">
           <div class="progress-label">
             <span>{{ item.label }}</span>
-            <span>{{ item.count }}锛坽{ item.percent }}%锛?/span>
+            <span>{{ item.count }}（{{ item.percent }}%）</span>
           </div>
           <el-progress :percentage="item.percent" :stroke-width="10" :color="item.color" :show-text="false" />
         </div>
@@ -883,22 +889,22 @@ onUnmounted(() => {
     <el-row :gutter="14" class="chart-row">
       <el-col :xs="24" :sm="24" :md="24" :lg="14">
         <div class="chart-card recognition-card">
-          <div class="panel-title">璇嗗埆鍏宠仈鐪嬫澘锛?02锛?/div>
+          <div class="panel-title">识别关联看板（102）</div>
           <div class="recognition-metrics">
             <div class="recognition-metric">
-              <div class="metric-label">璇嗗埆浜嬩欢</div>
+              <div class="metric-label">识别事件</div>
               <div class="metric-value">{{ recognitionStats.totalRecognizedEvents }}</div>
             </div>
             <div class="recognition-metric">
-              <div class="metric-label">鍏宠仈鎶撴媿</div>
+              <div class="metric-label">关联抓拍</div>
               <div class="metric-value">{{ recognitionStats.linkedCaptureCount }}</div>
             </div>
             <div class="recognition-metric">
-              <div class="metric-label">鍏宠仈鐩爣</div>
+              <div class="metric-label">关联目标</div>
               <div class="metric-value">{{ recognitionStats.linkedTargetTotal }}</div>
             </div>
             <div class="recognition-metric">
-              <div class="metric-label">鍚戦噺鎬诲瓧鑺?/div>
+              <div class="metric-label">向量总字节</div>
               <div class="metric-value">{{ recognitionStats.linkedVectorBytes }}</div>
             </div>
           </div>
@@ -908,20 +914,20 @@ onUnmounted(() => {
               <div v-for="packet in recognitionPackets" :key="packet.linkKey" class="recognition-item">
                 <div class="recognition-head">
                   <span>{{ formatTime(packet.timestamp, 'HH:mm:ss') }} | cam {{ packet.camId }}</span>
-                  <span>102: {{ packet.records102.length }}锛?03: {{ packet.records103.length }}</span>
+                  <span>102: {{ packet.records102.length }}，103: {{ packet.records103.length }}</span>
                 </div>
-                <div class="recognition-line">鍏宠仈101鐩爣锛歿{ linkedTargetCount(packet) }}</div>
-                <div class="recognition-line">鍚戦噺瀛楄妭锛歿{ linkedVectorPayload(packet) }}</div>
-                <div class="recognition-line">hex_preview锛歿{ recognitionFirstVectorHex(packet) }}</div>
+                <div class="recognition-line">关联101目标：{{ linkedTargetCount(packet) }}</div>
+                <div class="recognition-line">向量字节：{{ linkedVectorPayload(packet) }}</div>
+                <div class="recognition-line">hex_preview：{{ recognitionFirstVectorHex(packet) }}</div>
               </div>
             </div>
-            <div v-else class="empty-text">鏆傛棤璇嗗埆鍏宠仈鏁版嵁</div>
+            <div v-else class="empty-text">暂无识别关联数据</div>
           </el-scrollbar>
         </div>
       </el-col>
       <el-col :xs="24" :sm="24" :md="24" :lg="10">
         <div class="chart-card ratio-card">
-          <div class="panel-title">鍗忚鍗犳瘮</div>
+          <div class="panel-title">协议占比</div>
           <div ref="ratioChartRef" class="chart-box ratio-box" />
         </div>
       </el-col>
@@ -930,12 +936,12 @@ onUnmounted(() => {
     <el-row :gutter="14" class="content-row">
       <el-col :xs="24" :sm="24" :md="12" :lg="12">
         <div class="panel-card">
-          <div class="panel-title">101 鐩爣妫€娴嬭В鏋?/div>
+          <div class="panel-title">101 目标检测解析</div>
           <el-scrollbar class="scroll-area">
             <div v-if="list101.length > 0" class="feed-list">
               <div v-for="item in list101" :key="item.record_id" class="feed-item">
                 <div>
-                  [{{ formatTime(item.timestamp, 'HH:mm:ss') }}] 鎽勫儚澶?{{ item.cam_id }} 妫€娴嬪埌
+                  [{{ formatTime(item.timestamp, 'HH:mm:ss') }}] 摄像头 {{ item.cam_id }} 检测到
                   <span class="highlight">{{ (item.details as StreamRecord101Details).count }}</span> 涓洰鏍?
                 </div>
                 <div class="binary-line">
@@ -943,14 +949,14 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
-            <div v-else class="empty-text">鏆傛棤 101 鎺ㄩ€佹暟鎹?/div>
+            <div v-else class="empty-text">暂无 101 推送数据</div>
           </el-scrollbar>
         </div>
       </el-col>
 
       <el-col :xs="24" :sm="24" :md="12" :lg="12">
         <div class="panel-card">
-          <div class="panel-title">102 鍚戦噺瑙ｆ瀽</div>
+          <div class="panel-title">102 向量解析</div>
           <el-scrollbar class="scroll-area">
             <el-timeline v-if="list102.length > 0">
               <el-timeline-item
@@ -960,20 +966,20 @@ onUnmounted(() => {
                 placement="top"
               >
                 <div class="timeline-record">
-                  <div class="timeline-line">cam_id锛歿{ item.cam_id }}</div>
-                  <div class="timeline-line">payload_size锛歿{ (item.details as StreamRecord102Details).payload_size }}</div>
-                  <div class="timeline-line">hex_preview锛歿{ (item.details as StreamRecord102Details).vector_hex_preview || '--' }}</div>
+                  <div class="timeline-line">cam_id：{{ item.cam_id }}</div>
+                  <div class="timeline-line">payload_size：{{ (item.details as StreamRecord102Details).payload_size }}</div>
+                  <div class="timeline-line">hex_preview：{{ (item.details as StreamRecord102Details).vector_hex_preview || '--' }}</div>
                 </div>
               </el-timeline-item>
             </el-timeline>
-            <div v-else class="empty-text">鏆傛棤 102 鎺ㄩ€佹暟鎹?/div>
+            <div v-else class="empty-text">暂无 102 推送数据</div>
           </el-scrollbar>
         </div>
       </el-col>
     </el-row>
 
     <div class="panel-card panel-bottom">
-      <div class="panel-title">103 鍥剧墖鎶撴媿</div>
+      <div class="panel-title">103 图片抓拍</div>
       <el-row v-if="list103Linked.length > 0" :gutter="18" class="capture-row">
         <el-col
           v-for="entry in list103Linked"
@@ -993,17 +999,17 @@ onUnmounted(() => {
               @click="openImageDialog((entry.record.details as StreamRecord103Details).image_data_url, entry.targets)"
             />
             <div class="capture-meta">
-              <div>cam_id锛歿{ entry.record.cam_id }}</div>
-              <div>size锛歿{ (entry.record.details as StreamRecord103Details).payload_size }}</div>
+              <div>cam_id：{{ entry.record.cam_id }}</div>
+              <div>size：{{ (entry.record.details as StreamRecord103Details).payload_size }}</div>
               <div>{{ formatTime(entry.record.timestamp) }}</div>
-              <div class="capture-link">鍏宠仈 101锛歿{ entry.packet?.records101.length || 0 }} 鏉★紝102锛歿{ entry.packet?.records102.length || 0 }} 鏉?/div>
-              <div class="capture-link">璇嗗埆妗嗘暟閲忥細{{ entry.targets.length }}</div>
-              <div class="capture-link">鍏宠仈鐩爣锛歿{ linkedTargetCount(entry.packet) }}锛屽悜閲忓瓧鑺傦細{{ linkedVectorPayload(entry.packet) }}</div>
+              <div class="capture-link">关联 101：{{ entry.packet?.records101.length || 0 }} 条，102：{{ entry.packet?.records102.length || 0 }} 条</div>
+              <div class="capture-link">识别框数量：{{ entry.targets.length }}</div>
+              <div class="capture-link">关联目标：{{ linkedTargetCount(entry.packet) }}，向量字节：{{ linkedVectorPayload(entry.packet) }}</div>
             </div>
           </div>
         </el-col>
       </el-row>
-      <div v-else class="empty-text">鏆傛棤 103 鎺ㄩ€佹暟鎹?/div>
+      <div v-else class="empty-text">暂无 103 推送数据</div>
     </div>
 
     <el-dialog
@@ -1011,7 +1017,7 @@ onUnmounted(() => {
       width="75vw"
       align-center
       destroy-on-close
-      title="鎶撴媿鍥剧墖棰勮"
+      title="抓拍图片预览"
     >
       <div class="preview-dialog-content">
         <CanvasDetectionImage
