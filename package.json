@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build --configLoader native",
+    "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "ws:stream": "node scripts/ws-stream-bridge.mjs",
     "ws:stream:supervise": "powershell -ExecutionPolicy Bypass -File ./scripts/start-ws-stream-forever.ps1"
