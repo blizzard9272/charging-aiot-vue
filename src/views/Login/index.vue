@@ -15,11 +15,16 @@ const formData = reactive({
   password: ''
 })
 
-const sha256 = async (text: string) => {
+const normalizePassword = async (text: string) => {
   const safeText = String(text || '')
+  const subtle = window.crypto?.subtle
+  if (!subtle) {
+    return safeText
+  }
+
   const encoder = new TextEncoder()
   const data = encoder.encode(safeText)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+  const hashBuffer = await subtle.digest('SHA-256', data)
   const bytes = Array.from(new Uint8Array(hashBuffer))
   return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
@@ -32,7 +37,7 @@ const handleLogin = async () => {
 
   loading.value = true
   try {
-    const encryptedPassword = await sha256(formData.password)
+    const encryptedPassword = await normalizePassword(formData.password)
     const response = await login({
       username: formData.username.trim(),
       password: encryptedPassword

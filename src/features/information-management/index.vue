@@ -43,9 +43,15 @@ const roleText = (role: number) => {
   return map[Number(role) || 0] || String(role)
 }
 
-const sha256 = async (text: string) => {
+const normalizePassword = async (text: string) => {
+  const safeText = String(text || '')
+  const subtle = window.crypto?.subtle
+  if (!subtle) {
+    return safeText
+  }
+
   const encoder = new TextEncoder()
-  const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(String(text || '')))
+  const hashBuffer = await subtle.digest('SHA-256', encoder.encode(safeText))
   return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
@@ -117,7 +123,7 @@ const handleSave = async () => {
       tel: formData.tel.trim(),
       email: formData.email.trim()
     }
-    if (formData.password.trim()) payload.password = await sha256(formData.password.trim())
+    if (formData.password.trim()) payload.password = await normalizePassword(formData.password.trim())
     if (isEditMode.value) { await updatePersonnel(payload); ElMessage.success('更新成功') }
     else { await createPersonnel(payload); ElMessage.success('创建成功') }
     dialogVisible.value = false
