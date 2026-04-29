@@ -811,7 +811,6 @@ onUnmounted(() => {
           <el-tag :type="statusTagType">{{ statusText }}</el-tag>
           <el-button type="primary" @click="reconnectNow">连接</el-button>
           <el-button @click="disconnectNow">断开</el-button>
-          <!-- <el-button type="success" @click="loadSnapshotOnce">刷新快照</el-button> -->
         </div>
       </div>
     </el-card>
