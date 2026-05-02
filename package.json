@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc -b && vite build",
-    "preview": "vite preview",
+    "dev": "vite --config vite.config.js --configLoader native",
+    "build": "vue-tsc -b && vite build --config vite.config.js --configLoader native",
+    "preview": "vite preview --config vite.config.js --configLoader native",
     "ws:stream": "node scripts/ws-stream-bridge.mjs",
     "ws:stream:supervise": "powershell -ExecutionPolicy Bypass -File ./scripts/start-ws-stream-forever.ps1"
   },
