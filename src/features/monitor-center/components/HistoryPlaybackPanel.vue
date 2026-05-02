@@ -11,7 +11,7 @@ interface FolderNode {
   children: FolderNode[]
 }
 
-const QUERY_CHUNK = 500
+const QUERY_CHUNK = 200
 
 const allPlaybackList = ref<MonitorPlaybackItem[]>([])
 const coverMap = ref<Record<number, string>>({})
@@ -132,6 +132,7 @@ const loadPlaybackList = async () => {
     const merged: MonitorPlaybackItem[] = []
     let page = 1
     let queryTotal = 0
+    let previousMergedSize = 0
 
     while (page <= 200) {
       const res = await getMonitorPlaybackList({ page, pageSize: QUERY_CHUNK })
@@ -139,7 +140,9 @@ const loadPlaybackList = async () => {
       const batch = Array.isArray(res.data.records) ? res.data.records : []
       if (!batch.length) break
       merged.push(...batch)
-      if ((queryTotal > 0 && merged.length >= queryTotal) || batch.length < QUERY_CHUNK) break
+      if (queryTotal > 0 && merged.length >= queryTotal) break
+      if (merged.length === previousMergedSize) break
+      previousMergedSize = merged.length
       page += 1
     }
 
