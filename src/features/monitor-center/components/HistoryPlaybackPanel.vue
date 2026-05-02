@@ -7,6 +7,7 @@ interface FolderNode {
   id: string
   label: string
   path: string
+  count: number
   children: FolderNode[]
 }
 
@@ -63,7 +64,7 @@ const folderTree = computed<FolderNode[]>(() => {
   const ensureNode = (parent: FolderNode | null, fullPath: string, label: string) => {
     if (!parent) {
       if (!rootMap.has(fullPath)) {
-        const node: FolderNode = { id: fullPath, label, path: fullPath, children: [] }
+        const node: FolderNode = { id: fullPath, label, path: fullPath, count: 0, children: [] }
         rootMap.set(fullPath, node)
         roots.push(node)
       }
@@ -72,7 +73,7 @@ const folderTree = computed<FolderNode[]>(() => {
 
     const existing = parent.children.find((child) => child.path === fullPath)
     if (existing) return existing
-    const node: FolderNode = { id: fullPath, label, path: fullPath, children: [] }
+    const node: FolderNode = { id: fullPath, label, path: fullPath, count: 0, children: [] }
     parent.children.push(node)
     return node
   }
@@ -90,6 +91,7 @@ const folderTree = computed<FolderNode[]>(() => {
     folders.forEach((segment) => {
       currentPath = currentPath ? `${currentPath}/${segment}` : segment
       parent = ensureNode(parent, currentPath, segment)
+      parent.count += 1
     })
   })
 
@@ -375,7 +377,14 @@ watch(
             :expand-on-click-node="false"
             default-expand-all
             @node-click="handleFolderSelect"
-          />
+          >
+            <template #default="{ data }">
+              <div class="folder-node">
+                <span class="folder-name">{{ data.label }}</span>
+                <span class="folder-count">{{ data.count }}</span>
+              </div>
+            </template>
+          </el-tree>
         </el-card>
       </el-col>
 
@@ -472,6 +481,35 @@ watch(
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.folder-node {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.folder-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-count {
+  flex: none;
+  min-width: 28px;
+  padding: 0 6px;
+  border-radius: 10px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 20px;
+  color: #606266;
+  background: #f2f6fc;
 }
 
 .cover-box {
