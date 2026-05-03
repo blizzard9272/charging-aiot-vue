@@ -7,8 +7,10 @@ import DeviceFilter from './components/DeviceFilter.vue'
 import DeviceTable from './components/DeviceTable.vue'
 import WebRTCPlayer from '@/shared/components/WebRTCPlayer.vue'
 import DeviceEditDialog from './components/DeviceEditDialog.vue'
+import MediaMtxWarningsDialog from './components/MediaMtxWarningsDialog.vue'
 import type { CameraDeviceVO, DeviceQueryParams, MonitorGroupVO } from '@/shared/types/monitor-center'
 import { deleteMonitorDevice, getDeleteMonitorDeviceCheck, getMonitorList, getMonitorGroups, syncCameraConfig } from '@/api/device'
+import type { MediaMtxWarningItem } from '@/api/device'
 
 // 分页与查询参数
 const queryParams = reactive<DeviceQueryParams>({
@@ -28,6 +30,8 @@ const total = ref(0)
 const loading = ref(false)
 const deviceList = ref<CameraDeviceVO[]>([])
 const groupOptions = ref<MonitorGroupVO[]>([])
+const warningDialogVisible = ref(false)
+const warningItems = ref<MediaMtxWarningItem[]>([])
 const router = useRouter()
 
 const normalizeGroups = (data: any): MonitorGroupVO[] => {
@@ -218,7 +222,7 @@ const handleDelete = (row: CameraDeviceVO) => {
         const pathName = checkData.pathName || row.pathName || ''
         const pathLabel = pathName ? `（路径：${pathName}）` : ''
         await ElMessageBox.confirm(
-          `检测到 MediaMTX 配置中存在对应条目${pathLabel}，继续删除将仅注销设备，不会自动删除 MediaMTX 配置。是否继续删除？`,
+          `检测到 MediaMTX 配置中存在对应条目${pathLabel}。继续删除时，系统会尝试同步删除 MediaMTX 配置；如果删除失败，会在结果里提示。是否继续删除？`,
           '二次确认',
           {
             confirmButtonText: '继续删除',
@@ -237,8 +241,14 @@ const handleDelete = (row: CameraDeviceVO) => {
 
     loading.value = true
     try {
-      await deleteMonitorDevice(row.deviceId)
-      ElMessage.success(`已删除设备 ${row.deviceName}`)
+      const res = await deleteMonitorDevice(row.deviceId)
+      const warnings = Array.isArray(res.data?.mediaMtxWarnings) ? res.data.mediaMtxWarnings : []
+      if (warnings.length > 0) {
+        warningItems.value = warnings
+        warningDialogVisible.value = true
+      } else {
+        ElMessage.success(`已删除设备 ${row.deviceName}`)
+      }
       await fetchDeviceList()
     } catch (error: any) {
       ElMessage.error(error.message || '删除设备失败')
@@ -316,6 +326,12 @@ onUnmounted(() => {})
       ref="editDialogRef"
       v-model:visible="editDialogVisible"
       @success="fetchDeviceList"
+    />
+
+    <MediaMtxWarningsDialog
+      v-model:visible="warningDialogVisible"
+      :warnings="warningItems"
+      title="删除完成，但 MediaMTX 有警告"
     />
   </div>
 </template>

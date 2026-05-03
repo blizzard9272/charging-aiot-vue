@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { getMediaMtxHealth } from '@/api/device'
+import { ElMessage } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
+import { getMediaMtxHealth, syncCameraConfig } from '@/api/device'
 import type { MediaMtxHealthResult } from '@/api/device'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import HistoryPlaybackPanel from './components/HistoryPlaybackPanel.vue'
@@ -12,6 +14,7 @@ type SectionName = 'workbench' | 'group-management' | 'device-center' | 'video-l
 
 const route = useRoute()
 const mediaMtxHealth = ref<MediaMtxHealthResult | null>(null)
+const syncLoading = ref(false)
 let healthTimer: number | null = null
 
 const sectionComponentMap: Record<SectionName, any> = {
@@ -76,6 +79,31 @@ const fetchMediaMtxHealth = async () => {
   }
 }
 
+const handleManualSync = async () => {
+  if (syncLoading.value) return
+
+  syncLoading.value = true
+  try {
+    const res = await syncCameraConfig()
+    const result = res.data
+
+    if (result && result.failedCount > 0) {
+      ElMessage.warning(`回灌完成，但有 ${result.failedCount} 条失败，${result.skippedCount} 条跳过`)
+      console.warn('[MonitorCenter] syncCameraConfig failedItems', result.failedItems)
+      console.warn('[MonitorCenter] syncCameraConfig skippedItems', result.skippedItems)
+    } else {
+      ElMessage.success(`回灌完成：成功 ${result?.successCount ?? 0} 条，跳过 ${result?.skippedCount ?? 0} 条`)
+    }
+
+    await fetchMediaMtxHealth()
+    window.dispatchEvent(new CustomEvent('monitor-center-sync-finished'))
+  } catch (error: any) {
+    ElMessage.error(error?.message || '手动回灌失败')
+  } finally {
+    syncLoading.value = false
+  }
+}
+
 onMounted(async () => {
   await fetchMediaMtxHealth()
   healthTimer = window.setInterval(() => {
@@ -96,6 +124,16 @@ onUnmounted(() => {
     <el-card shadow="never" class="title-card">
       <div class="title-row">
         <span class="breadcrumb-label">{{ breadcrumbText }}</span>
+        <el-button
+          v-if="activeSection === 'workbench'"
+          class="title-sync-btn"
+          type="primary"
+          :icon="Refresh"
+          :loading="syncLoading"
+          @click="handleManualSync"
+        >
+          手动回灌
+        </el-button>
       </div>
     </el-card>
 
@@ -139,6 +177,10 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   min-height: 44px;
+}
+
+.title-sync-btn {
+  margin-left: auto;
 }
 
 .breadcrumb-label {

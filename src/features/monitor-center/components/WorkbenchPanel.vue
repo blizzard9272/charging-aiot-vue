@@ -421,6 +421,10 @@ const handleResize = () => {
   actionChart?.resize()
 }
 
+const handleExternalSyncFinished = async () => {
+  await Promise.all([fetchDeviceList(), fetchAuditStats(), fetchMediaMtxHealth()])
+}
+
 onMounted(async () => {
   await Promise.all([fetchDeviceList(), fetchAuditStats(), fetchMediaMtxHealth()])
   await initChart()
@@ -428,10 +432,12 @@ onMounted(async () => {
     fetchMediaMtxHealth()
   }, 15000)
   window.addEventListener('resize', handleResize)
+  window.addEventListener('monitor-center-sync-finished', handleExternalSyncFinished)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('monitor-center-sync-finished', handleExternalSyncFinished)
   if (healthTimer !== null) {
     window.clearInterval(healthTimer)
     healthTimer = null
@@ -675,6 +681,11 @@ onUnmounted(() => {
   margin: 0;
   font-size: 12px;
   color: #64748b;
+}
+
+.stats-meta {
+  flex: 1;
+  min-width: 0;
 }
 
 .stats-value {

@@ -94,6 +94,31 @@ export interface DeleteDeviceCheckResult {
   mediaMtxCheckMessage: string
 }
 
+export interface MediaMtxWarningItem {
+  pathName: string
+  code: number
+  message: string
+}
+
+export interface CreateMonitorDeviceResult {
+  deviceId: number
+  pathUuid: string
+  pathName: string
+  sourceUrl: string
+  mediaMtxWarnings?: MediaMtxWarningItem[]
+}
+
+export interface UpdateMonitorDeviceResult {
+  mediaMtx?: Record<string, any> | null
+  mediaMtxWarnings?: MediaMtxWarningItem[]
+}
+
+export interface DeleteMonitorDeviceResult {
+  deviceId: number
+  removedPathNames: string[]
+  mediaMtxWarnings: MediaMtxWarningItem[]
+}
+
 export interface MonitorPlaybackItem {
   id: number
   name: string
@@ -212,12 +237,12 @@ export function updateMonitorGroup(data: GroupSaveDTO) {
 
 // 鏇存柊璁惧
 export function updateMonitorDevice(data: DeviceFormDTO) {
-  return request.put<any, ApiResponse<null>>('/charging-aiot-php/api/monitor-center/device-center/update.php', data)
+  return request.put<any, ApiResponse<UpdateMonitorDeviceResult | null>>('/charging-aiot-php/api/monitor-center/device-center/update.php', data)
 }
 
 // 鏂板璁惧
 export function createMonitorDevice(data: CreateDeviceDTO) {
-  return request.post<any, ApiResponse<{ deviceId: number }>>('/charging-aiot-php/api/monitor-center/device-center/create.php', data)
+  return request.post<any, ApiResponse<CreateMonitorDeviceResult>>('/charging-aiot-php/api/monitor-center/device-center/create.php', data)
 }
 
 // 鍒犻櫎鍓嶆鏌?MediaMTX 閰嶇疆
@@ -233,7 +258,7 @@ export function getDeleteMonitorDeviceCheck(deviceId: number, timeout = 800) {
 
 // 鍒犻櫎璁惧
 export function deleteMonitorDevice(deviceId: number) {
-  return request.delete<any, ApiResponse<null>>('/charging-aiot-php/api/monitor-center/device-center/delete.php', {
+  return request.delete<any, ApiResponse<DeleteMonitorDeviceResult>>('/charging-aiot-php/api/monitor-center/device-center/delete.php', {
     data: { deviceId }
   })
 }

@@ -3,8 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import type { MonitorGroupVO, CreateDeviceDTO } from '@/shared/types/monitor-center'
+import type { CreateDeviceDTO, MonitorGroupVO } from '@/shared/types/monitor-center'
 import { createMonitorDevice, getMonitorGroups } from '@/api/device'
+import type { MediaMtxWarningItem } from '@/api/device'
+import MediaMtxWarningsDialog from './components/MediaMtxWarningsDialog.vue'
 
 interface CreateCameraForm {
   groupId: number | ''
@@ -31,6 +33,9 @@ const router = useRouter()
 const formRef = ref<FormInstance>()
 const submitLoading = ref(false)
 const groupOptions = ref<MonitorGroupVO[]>([])
+const warningDialogVisible = ref(false)
+const warningItems = ref<MediaMtxWarningItem[]>([])
+const pendingRedirect = ref(false)
 
 const generateDeviceUuid = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -41,7 +46,7 @@ const generateDeviceUuid = () => {
 
 const autoDeviceUuid = ref(generateDeviceUuid())
 
-const formData = reactive<CreateCameraForm>({
+const defaultFormData = (): CreateCameraForm => ({
   groupId: '',
   deviceName: '',
   brand: '',
@@ -62,11 +67,13 @@ const formData = reactive<CreateCameraForm>({
   recordFormat: 'fmp4'
 })
 
+const formData = reactive<CreateCameraForm>(defaultFormData())
+
 const autoSourceUrl = computed(() => {
   const ip = formData.ipAddress.trim()
   const user = formData.username.trim()
   const pass = formData.password.trim()
-  const port = formData.port
+  const port = Number(formData.port || 554)
   const channel = formData.streamType === 2 ? 102 : 101
   if (!ip || !user || !pass) return '--'
 
@@ -120,7 +127,7 @@ const fetchGroups = async () => {
   try {
     const res = await getMonitorGroups()
     groupOptions.value = normalizeGroups(res.data)
-  } catch (error) {
+  } catch (_error) {
     groupOptions.value = []
     ElMessage.error('获取分组列表失败')
   }
@@ -128,46 +135,66 @@ const fetchGroups = async () => {
 
 const handleSubmit = async () => {
   if (!formRef.value) return
-  await formRef.value.validate(async (valid) => {
-    if (!valid) return
-    submitLoading.value = true
-    try {
-      const payload: CreateDeviceDTO = {
-        deviceUuid: autoDeviceUuid.value,
-        groupId: Number(formData.groupId),
-        deviceName: formData.deviceName,
-        brand: formData.brand,
-        model: formData.model,
-        protocolType: formData.protocolType,
-        ipAddress: formData.ipAddress,
-        port: formData.port,
-        username: formData.username,
-        password: formData.password,
-        confirmPassword: formData.confirmPassword,
-        location: formData.location,
-        onlineStatus: formData.onlineStatus,
-        streamType: formData.streamType,
-        pathName: formData.pathName,
-        recordEnabled: formData.recordEnabled,
-        recordPath: formData.recordPath,
-        recordFormat: formData.recordFormat,
-        recordPartDuration: formData.recordPartDuration
-      }
 
-      await createMonitorDevice(payload)
+  try {
+    await formRef.value.validate()
+  } catch {
+    return
+  }
+
+  submitLoading.value = true
+  try {
+    const payload: CreateDeviceDTO = {
+      deviceUuid: autoDeviceUuid.value,
+      groupId: Number(formData.groupId),
+      deviceName: formData.deviceName,
+      brand: formData.brand,
+      model: formData.model,
+      protocolType: formData.protocolType,
+      ipAddress: formData.ipAddress,
+      port: formData.port,
+      username: formData.username,
+      password: formData.password,
+      confirmPassword: formData.confirmPassword,
+      location: formData.location,
+      onlineStatus: formData.onlineStatus,
+      streamType: formData.streamType,
+      pathName: formData.pathName,
+      recordEnabled: formData.recordEnabled,
+      recordPath: formData.recordPath,
+      recordFormat: formData.recordFormat,
+      recordPartDuration: formData.recordPartDuration
+    }
+
+    const res = await createMonitorDevice(payload)
+    const warnings = Array.isArray(res.data?.mediaMtxWarnings) ? res.data.mediaMtxWarnings : []
+    if (warnings.length > 0) {
+      warningItems.value = warnings
+      warningDialogVisible.value = true
+      pendingRedirect.value = true
+    } else {
       ElMessage.success('新增摄像头成功')
       router.push('/device-center')
-    } catch (error: any) {
-      ElMessage.error(error.message || '新增摄像头失败')
-    } finally {
-      submitLoading.value = false
     }
-  })
+  } catch (error: any) {
+    ElMessage.error(error.message || '新增摄像头失败')
+  } finally {
+    submitLoading.value = false
+  }
+}
+
+const handleWarningDialogClose = (visible: boolean) => {
+  warningDialogVisible.value = visible
+  if (!visible && pendingRedirect.value) {
+    pendingRedirect.value = false
+    router.push('/device-center')
+  }
 }
 
 const handleReset = () => {
   autoDeviceUuid.value = generateDeviceUuid()
-  formRef.value?.resetFields()
+  Object.assign(formData, defaultFormData())
+  formRef.value?.clearValidate()
 }
 
 const handleBack = () => {
@@ -187,24 +214,14 @@ onMounted(() => {
     </div>
 
     <div class="form-card">
-      <el-form
-        ref="formRef"
-        :model="formData"
-        :rules="rules"
-        label-width="110px"
-      >
+      <el-form ref="formRef" :model="formData" :rules="rules" label-width="110px">
         <div class="section-card">
           <div class="section-title">设备信息</div>
           <el-row :gutter="20">
             <el-col :span="12">
               <el-form-item label="分组" prop="groupId">
                 <el-select v-model="formData.groupId" placeholder="请选择分组" style="width: 100%">
-                  <el-option
-                    v-for="group in groupOptions"
-                    :key="group.id"
-                    :label="group.groupName"
-                    :value="group.id"
-                  />
+                  <el-option v-for="group in groupOptions" :key="group.id" :label="group.groupName" :value="group.id" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -228,8 +245,8 @@ onMounted(() => {
             </el-col>
 
             <el-col :span="24">
-              <el-form-item label="安装地理位置" prop="location">
-                <el-input v-model="formData.location" placeholder="请输入安装的地理位置" />
+              <el-form-item label="安装位置" prop="location">
+                <el-input v-model="formData.location" placeholder="请输入安装位置" />
               </el-form-item>
             </el-col>
 
@@ -237,11 +254,10 @@ onMounted(() => {
               <el-form-item label="在线状态" prop="onlineStatus">
                 <el-radio-group v-model="formData.onlineStatus">
                   <el-radio :value="0">离线</el-radio>
-                  <el-radio :value="1">上线</el-radio>
+                  <el-radio :value="1">在线</el-radio>
                 </el-radio-group>
               </el-form-item>
             </el-col>
-
           </el-row>
         </div>
 
@@ -257,8 +273,8 @@ onMounted(() => {
             <el-col :span="12">
               <el-form-item label="码流类型" prop="streamType">
                 <el-select v-model="formData.streamType" style="width: 100%">
-                  <el-option label="主码流(101)" :value="1" />
-                  <el-option label="子码流(102)" :value="2" />
+                  <el-option label="主码流 (101)" :value="1" />
+                  <el-option label="子码流 (102)" :value="2" />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -283,23 +299,13 @@ onMounted(() => {
 
             <el-col :span="12">
               <el-form-item label="拉流密码" prop="password">
-                <el-input
-                  v-model="formData.password"
-                  type="password"
-                  show-password
-                  placeholder="请输入拉流密码"
-                />
+                <el-input v-model="formData.password" type="password" show-password placeholder="请输入拉流密码" />
               </el-form-item>
             </el-col>
 
             <el-col :span="12">
               <el-form-item label="确认密码" prop="confirmPassword">
-                <el-input
-                  v-model="formData.confirmPassword"
-                  type="password"
-                  show-password
-                  placeholder="请再次输入密码"
-                />
+                <el-input v-model="formData.confirmPassword" type="password" show-password placeholder="请再次输入密码" />
               </el-form-item>
             </el-col>
 
@@ -317,13 +323,7 @@ onMounted(() => {
 
             <el-col :span="12">
               <el-form-item label="切片时长(秒)" prop="recordPartDuration">
-                <el-input-number
-                  v-model="formData.recordPartDuration"
-                  :min="5"
-                  :max="600"
-                  :step="5"
-                  style="width: 100%"
-                />
+                <el-input-number v-model="formData.recordPartDuration" :min="5" :max="600" :step="5" style="width: 100%" />
               </el-form-item>
             </el-col>
 
@@ -357,6 +357,13 @@ onMounted(() => {
         </div>
       </el-form>
     </div>
+
+    <MediaMtxWarningsDialog
+      v-model:visible="warningDialogVisible"
+      :warnings="warningItems"
+      title="新增完成，但 MediaMTX 有警告"
+      @update:visible="handleWarningDialogClose"
+    />
   </div>
 </template>
 
