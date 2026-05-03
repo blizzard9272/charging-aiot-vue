@@ -175,7 +175,35 @@ const onSave = async () => {
       loading.value = true
       try {
         syncGroupName()
-        await updateMonitorDevice({ ...formData })
+        const payload: DeviceFormDTO = {
+          deviceId: Number(formData.deviceId || 0),
+          groupId: Number(formData.groupId || 0),
+          groupName: String(formData.groupName || ''),
+          deviceName: String(formData.deviceName || ''),
+          deviceUuid: String(formData.deviceUuid || ''),
+          brand: String(formData.brand || ''),
+          model: String(formData.model || ''),
+          protocolType: Number(formData.protocolType || 1),
+          ipAddress: String(formData.ipAddress || ''),
+          port: Number(formData.port || 554),
+          username: String(formData.username || ''),
+          password: String(formData.password || ''),
+          location: String(formData.location || ''),
+          onlineStatus: Number(formData.onlineStatus || 0),
+          statusFlag: Number(formData.statusFlag || 1),
+          pathId: formData.pathId == null ? null : Number(formData.pathId),
+          pathUuid: String(formData.pathUuid || ''),
+          pathName: String(formData.pathName || ''),
+          sourceUrl: String(formData.sourceUrl || ''),
+          streamType: Number(formData.streamType || 1),
+          recordEnabled: Number(formData.recordEnabled || 0),
+          recordPath: String(formData.recordPath || ''),
+          recordFormat: String(formData.recordFormat || 'fmp4'),
+          recordPartDuration: Number(formData.recordPartDuration || 60),
+          pathStatusFlag: formData.pathStatusFlag == null ? 1 : Number(formData.pathStatusFlag)
+        }
+
+        await updateMonitorDevice(payload)
         
         ElMessage.success('设备更新成功')
         emit('success')
