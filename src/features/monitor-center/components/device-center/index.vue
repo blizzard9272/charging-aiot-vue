@@ -8,9 +8,10 @@ import DeviceTable from './components/DeviceTable.vue'
 import WebRTCPlayer from '@/shared/components/WebRTCPlayer.vue'
 import DeviceEditDialog from './components/DeviceEditDialog.vue'
 import MediaMtxWarningsDialog from './components/MediaMtxWarningsDialog.vue'
+import SyncCameraConfigResultDialog from '../SyncCameraConfigResultDialog.vue'
 import type { CameraDeviceVO, DeviceQueryParams, MonitorGroupVO } from '@/shared/types/monitor-center'
 import { deleteMonitorDevice, getDeleteMonitorDeviceCheck, getMonitorList, getMonitorGroups, syncCameraConfig } from '@/api/device'
-import type { MediaMtxWarningItem } from '@/api/device'
+import type { MediaMtxWarningItem, SyncCameraConfigResult } from '@/api/device'
 
 // 分页与查询参数
 const queryParams = reactive<DeviceQueryParams>({
@@ -32,6 +33,8 @@ const deviceList = ref<CameraDeviceVO[]>([])
 const groupOptions = ref<MonitorGroupVO[]>([])
 const warningDialogVisible = ref(false)
 const warningItems = ref<MediaMtxWarningItem[]>([])
+const syncResultDialogVisible = ref(false)
+const syncResult = ref<SyncCameraConfigResult | null>(null)
 const router = useRouter()
 
 const normalizeGroups = (data: any): MonitorGroupVO[] => {
@@ -113,10 +116,11 @@ const handleSyncConfig = async () => {
   loading.value = true
   try {
     const res = await syncCameraConfig()
-    const result = res.data
+    const result = res.data || null
+    syncResult.value = result
+    syncResultDialogVisible.value = true
     if (result && result.failedCount > 0) {
       ElMessage.warning(`配置同步完成，但有 ${result.failedCount} 条失败，${result.skippedCount} 条跳过`)
-      console.warn('[DeviceCenter] syncCameraConfig failures', result.failedItems)
     } else {
       ElMessage.success(`配置同步完成：成功 ${result?.successCount ?? 0} 条，跳过 ${result?.skippedCount ?? 0} 条`)
     }
@@ -332,6 +336,12 @@ onUnmounted(() => {})
       v-model:visible="warningDialogVisible"
       :warnings="warningItems"
       title="删除完成，但 MediaMTX 有警告"
+    />
+
+    <SyncCameraConfigResultDialog
+      v-model:visible="syncResultDialogVisible"
+      :result="syncResult"
+      title="同步配置结果"
     />
   </div>
 </template>

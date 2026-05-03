@@ -30,8 +30,9 @@ interface WsRecordLike {
 
 const router = useRouter()
 
-const MAX_CACHE_RECORDS = 5000
-const SNAPSHOT_BATCH_SIZE = 200
+const MAX_CACHE_RECORDS = 1200
+const SNAPSHOT_BATCH_SIZE = 150
+const CAPTURE_PREVIEW_LIMIT = 8
 const WS_OPEN_TIMEOUT = 7000
 const RECONNECT_BASE_INTERVAL = 3000
 const RECONNECT_MAX_INTERVAL = 30000
@@ -45,6 +46,7 @@ const lastPushEventTime = ref<number | null>(null)
 const lastPushReceivedTime = ref<number | null>(null)
 
 const records = ref<UploadStreamRecord[]>([])
+const capturePreviewRecords = ref<UploadStreamRecord[]>([])
 const protocolTotals = ref<Record<number, number>>({ 101: 0, 102: 0, 103: 0 })
 const linkMode = ref<'strict' | 'loose'>('strict')
 const protocolChartRef = ref<HTMLDivElement>()
@@ -58,6 +60,7 @@ let reconnectTimer: number | null = null
 let manualClose = false
 let reconnectAttempt = 0
 let disconnectedNotified = false
+let chartRenderQueued = false
 
 const parseCreateTimeMs = (createTime: string) => {
   if (!createTime) return 0
@@ -262,9 +265,7 @@ const targetsByTimestampKey = computed(() => {
 })
 
 const latestCaptureEntries = computed(() => {
-  return records.value
-    .filter((item) => item.protocol_id === 103)
-    .slice(0, 8)
+  return capturePreviewRecords.value
     .map((item) => {
       const linkKey = buildStrictFrameLinkKey(item)
       const tsKey = `${cameraText(item)}_${item.timestamp}`
@@ -486,6 +487,16 @@ const appendRecords = (incoming: UploadStreamRecord[]) => {
     .sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp)
     .slice(0, MAX_CACHE_RECORDS)
 
+  const previewIncoming = incoming.filter(
+    (item) => item.protocol_id === 103 && String((item.details as StreamRecord103Details).image_data_url || '').trim() !== ''
+  )
+  if (previewIncoming.length > 0) {
+    capturePreviewRecords.value = [...previewIncoming, ...capturePreviewRecords.value]
+      .sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp)
+      .filter((item, index, list) => list.findIndex((candidate) => candidate.record_id === item.record_id) === index)
+      .slice(0, CAPTURE_PREVIEW_LIMIT)
+  }
+
   protocolTotals.value = {
     101: (protocolTotals.value[101] || 0) + addedCounts[101],
     102: (protocolTotals.value[102] || 0) + addedCounts[102],
@@ -641,6 +652,21 @@ const connectWs = () => {
   connectByCandidates(buildWsCandidates(wsUrl.value))
 }
 
+const loadCapturePreviews = async () => {
+  const res = await fetchUploadStreamRecords({
+    protocol: 103,
+    limit: CAPTURE_PREVIEW_LIMIT,
+    offset: 0,
+    include_payload: 1
+  })
+
+  const batch = Array.isArray(res?.data?.records) ? res.data.records : []
+  capturePreviewRecords.value = batch
+    .filter((item) => item.protocol_id === 103 && String((item.details as StreamRecord103Details).image_data_url || '').trim() !== '')
+    .sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp)
+    .slice(0, CAPTURE_PREVIEW_LIMIT)
+}
+
 const loadSnapshotOnce = async () => {
   loading.value = true
   try {
@@ -649,7 +675,7 @@ const loadSnapshotOnce = async () => {
     let total = 0
 
     while (offset < MAX_CACHE_RECORDS) {
-      const res = await fetchUploadStreamRecords({ limit: SNAPSHOT_BATCH_SIZE, offset, include_payload: 1 })
+      const res = await fetchUploadStreamRecords({ limit: SNAPSHOT_BATCH_SIZE, offset, include_payload: 0 })
       total = Number(res?.data?.total || total || 0)
       const batch = Array.isArray(res?.data?.records) ? res.data.records : []
       if (!batch.length) break
@@ -669,11 +695,22 @@ const loadSnapshotOnce = async () => {
       const latestReceivedTs = parseCreateTimeMs(records.value[0].create_time || '')
       lastPushReceivedTime.value = latestReceivedTs > 0 ? latestReceivedTs : latestEventTs || Date.now()
     }
+
+    await loadCapturePreviews()
   } catch (_error) {
     ElMessage.error('数据展示中心初始化加载失败')
   } finally {
     loading.value = false
   }
+}
+
+const queueRenderCharts = () => {
+  if (chartRenderQueued) return
+  chartRenderQueued = true
+  window.requestAnimationFrame(async () => {
+    chartRenderQueued = false
+    await renderCharts()
+  })
 }
 
 const renderCharts = async () => {
@@ -739,13 +776,23 @@ const renderCharts = async () => {
   }
 }
 
-watch(records, async () => {
-  await renderCharts()
-}, { deep: true })
+watch(
+  () => [
+    records.value.length,
+    protocolTotals.value[101] || 0,
+    protocolTotals.value[102] || 0,
+    protocolTotals.value[103] || 0,
+    stats.value.linked,
+    stats.value.fullLinked
+  ],
+  () => {
+    queueRenderCharts()
+  }
+)
 
 onMounted(async () => {
   await loadSnapshotOnce()
-  await renderCharts()
+  queueRenderCharts()
   connectWs()
 
   if ('ResizeObserver' in window) {
