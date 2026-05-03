@@ -1,6 +1,8 @@
-﻿<script setup lang="ts">
-import { computed } from 'vue'
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { getMediaMtxHealth } from '@/api/device'
+import type { MediaMtxHealthResult } from '@/api/device'
 import WorkbenchPanel from './components/WorkbenchPanel.vue'
 import HistoryPlaybackPanel from './components/HistoryPlaybackPanel.vue'
 import DeviceCenterView from '@/features/monitor-center/components/device-center/index.vue'
@@ -9,6 +11,8 @@ import GroupManagementPanel from './components/GroupManagementPanel.vue'
 type SectionName = 'workbench' | 'group-management' | 'device-center' | 'video-list'
 
 const route = useRoute()
+const mediaMtxHealth = ref<MediaMtxHealthResult | null>(null)
+let healthTimer: number | null = null
 
 const sectionComponentMap: Record<SectionName, any> = {
   workbench: WorkbenchPanel,
@@ -27,12 +31,63 @@ const getSectionByPath = (path: string): SectionName => {
 const activeSection = computed<SectionName>(() => getSectionByPath(route.path))
 const currentSectionComponent = computed(() => sectionComponentMap[activeSection.value])
 
+const isMediaMtxSyncing = computed(() => {
+  const health = mediaMtxHealth.value
+  if (!health) return false
+
+  const nowTs = Number(health.nowTs || 0)
+  const lastAttemptTs = Number(health.lastAttemptTs || 0)
+  const lastSuccessTs = Number(health.lastSuccessTs || 0)
+  const intervalSeconds = Math.max(Number(health.intervalSeconds || 0), 30)
+
+  if (lastSuccessTs > 0) return false
+  if (lastAttemptTs <= 0) return true
+
+  return nowTs > 0 && nowTs - lastAttemptTs <= intervalSeconds * 2
+})
+
+const syncStatusText = computed(() => {
+  const health = mediaMtxHealth.value
+  if (!health) {
+    return 'MediaMTX is syncing config from the database. Please wait before previewing streams or checking recording settings.'
+  }
+
+  if (health.lastAttemptAt) {
+    return `MediaMTX is syncing config from the database. Last sync attempt: ${health.lastAttemptAt}. Please wait before previewing streams or checking recording settings.`
+  }
+
+  return 'MediaMTX is syncing config from the database. Please wait before previewing streams or checking recording settings.'
+})
+
 const breadcrumbText = computed(() => {
-  const parent = String(route.meta.parentTitle || '鐩戞帶涓績')
+  const parent = String(route.meta.parentTitle || 'Monitor Center')
   const title = String(route.meta.title || '')
   const leaf = title.includes('-') ? title.split('-').at(-1) : title
 
-  return `${parent} / ${leaf || '缁煎悎鐪嬫澘'}`
+  return `${parent} / ${leaf || 'Workbench'}`
+})
+
+const fetchMediaMtxHealth = async () => {
+  try {
+    const res = await getMediaMtxHealth()
+    mediaMtxHealth.value = res.data || null
+  } catch (_error) {
+    mediaMtxHealth.value = null
+  }
+}
+
+onMounted(async () => {
+  await fetchMediaMtxHealth()
+  healthTimer = window.setInterval(() => {
+    fetchMediaMtxHealth()
+  }, 3000)
+})
+
+onUnmounted(() => {
+  if (healthTimer !== null) {
+    window.clearInterval(healthTimer)
+    healthTimer = null
+  }
 })
 </script>
 
@@ -44,7 +99,22 @@ const breadcrumbText = computed(() => {
       </div>
     </el-card>
 
-    <div class="section-content">
+    <el-alert
+      v-if="isMediaMtxSyncing"
+      class="sync-alert"
+      title="MediaMTX Sync In Progress"
+      type="warning"
+      :closable="false"
+      show-icon
+      :description="syncStatusText"
+    />
+
+    <div
+      class="section-content"
+      v-loading="isMediaMtxSyncing"
+      element-loading-text="MediaMTX is syncing config from the database..."
+      element-loading-background="rgba(255, 255, 255, 0.72)"
+    >
       <component :is="currentSectionComponent" />
     </div>
   </div>
@@ -58,6 +128,10 @@ const breadcrumbText = computed(() => {
 
 .title-card {
   border: none;
+  margin-bottom: 10px;
+}
+
+.sync-alert {
   margin-bottom: 10px;
 }
 
@@ -83,4 +157,3 @@ const breadcrumbText = computed(() => {
   min-height: 0;
 }
 </style>
-
