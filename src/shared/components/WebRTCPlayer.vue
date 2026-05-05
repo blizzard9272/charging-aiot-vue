@@ -48,13 +48,33 @@ const cleanup = () => {
   }
 }
 
-const getOfferUrls = (url: string) => {
-  // 根据 playUrl，比如 "http://172.18.7.124:8889/cam1/" 构造 SDP Offer 地址
+const getWhepUrl = (url: string) => {
+  // MediaMTX 当前部署使用 WHEP 入口，不再探测旧的 /webrtc/offer 路径。
   const baseUrl = url.endsWith('/') ? url.slice(0, -1) : url
-  return [
-    `${baseUrl}/webrtc/offer`,
-    `${baseUrl}/whep`
-  ]
+  return `${baseUrl}/whep`
+}
+
+const waitForIceGatheringComplete = (pc: RTCPeerConnection) => {
+  if (pc.iceGatheringState === 'complete') {
+    return Promise.resolve()
+  }
+
+  return new Promise<void>((resolve) => {
+    const handleStateChange = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', handleStateChange)
+        resolve()
+      }
+    }
+
+    pc.addEventListener('icegatheringstatechange', handleStateChange)
+
+    // 兜底超时，避免 candidate 长时间未完成时界面一直卡住。
+    window.setTimeout(() => {
+      pc.removeEventListener('icegatheringstatechange', handleStateChange)
+      resolve()
+    }, 3000)
+  })
 }
 
 const initWebRTC = async (url: string) => {
@@ -70,6 +90,28 @@ const initWebRTC = async (url: string) => {
     statusText.value = '正在连接 WebRTC 视频流...'
     
     peerConnection = new RTCPeerConnection()
+
+    peerConnection.onicegatheringstatechange = () => {
+      console.log('[WebRTCPlayer] iceGatheringState:', peerConnection?.iceGatheringState)
+    }
+
+    peerConnection.oniceconnectionstatechange = () => {
+      console.log('[WebRTCPlayer] iceConnectionState:', peerConnection?.iceConnectionState)
+      if (peerConnection?.iceConnectionState === 'failed') {
+        statusText.value = '连接失败: ICE 协商失败'
+      }
+    }
+
+    peerConnection.onconnectionstatechange = () => {
+      console.log('[WebRTCPlayer] connectionState:', peerConnection?.connectionState)
+      if (peerConnection?.connectionState === 'failed') {
+        statusText.value = '连接失败: WebRTC 连接失败'
+      }
+    }
+
+    peerConnection.onsignalingstatechange = () => {
+      console.log('[WebRTCPlayer] signalingState:', peerConnection?.signalingState)
+    }
     
     peerConnection.ontrack = (event) => {
       if (!videoRef.value || sessionId !== currentSessionId) return
@@ -84,35 +126,38 @@ const initWebRTC = async (url: string) => {
     
     const offer = await peerConnection.createOffer()
     await peerConnection.setLocalDescription(offer)
-    
-    let answerSdp = ''
-    let lastError: any = null
-    const offerUrls = getOfferUrls(url)
-    
-    for (const offerUrl of offerUrls) {
-      try {
-        const response = await fetch(offerUrl, {
-          method: 'POST',
-          body: offer.sdp,
-          headers: {
-            'Content-Type': 'application/sdp'
-          }
-        })
-        
-        if (!response.ok) {
-          throw new Error(`服务端拒绝连接: ${response.status}`)
-        }
-        
-        answerSdp = await response.text()
-        break
-      } catch (error) {
-        lastError = error
+
+    await waitForIceGatheringComplete(peerConnection)
+
+    const localSdp = peerConnection.localDescription?.sdp || offer.sdp || ''
+    if (!localSdp) {
+      throw new Error('本地 SDP 为空')
+    }
+
+    const whepUrl = getWhepUrl(url)
+    console.log('[WebRTCPlayer] POST WHEP offer:', whepUrl)
+
+    const response = await fetch(whepUrl, {
+      method: 'POST',
+      body: localSdp,
+      headers: {
+        'Content-Type': 'application/sdp'
       }
+    })
+
+    if (!response.ok) {
+      throw new Error(`WHEP 服务端拒绝连接: ${response.status}`)
     }
-    
+
+    const answerSdp = await response.text()
     if (!answerSdp) {
-      throw lastError || new Error('WebRTC SDP 应答为空')
+      throw new Error('WebRTC SDP 应答为空')
     }
+
+    console.log('[WebRTCPlayer] WHEP session created:', {
+      status: response.status,
+      location: response.headers.get('Location')
+    })
     
     if (sessionId !== currentSessionId || !peerConnection) return
     
