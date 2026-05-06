@@ -6,7 +6,10 @@ export interface StorageCategorySetting {
   name: string
   description: string
   path_template: string
+  default_template: string
+  is_recommended: 0 | 1
   example_path: string
+  placeholders?: string[]
 }
 
 export interface StorageSettingsListVO {

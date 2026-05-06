@@ -4,6 +4,7 @@ import type { ApiResponse } from './common'
 export interface StreamTarget {
   type: number
   tid: number
+  face_id?: number
   x1: number
   y1: number
   x2: number
@@ -16,6 +17,10 @@ export interface StreamRecord101Details {
   count: number
   target_count?: number
   obj_type?: number
+  frame_face_count?: number
+  frame_width?: number
+  frame_height?: number
+  reserved_value?: number
   targets: StreamTarget[]
   payload_hex_rebuilt: string
   frame_target_count?: number
@@ -25,6 +30,7 @@ export interface StreamRecord102Details {
   payload_size: number
   target_count?: number
   obj_type?: number
+  face_id?: number
   vector_base64_preview: string
   vector_hex_preview: string
   vector_payload_hex_preview: string
@@ -39,6 +45,7 @@ export interface StreamRecord102Details {
 
 export interface StreamRecord103Details {
   tid?: number
+  face_id?: number
   payload_size: number
   image_hex_preview: string
   base64_image: string
@@ -46,6 +53,20 @@ export interface StreamRecord103Details {
   frame_image_url?: string
   image_fetch_status?: string
   local_image_path?: string
+  media_kind?: string
+  media_url?: string
+  payload_type?: number
+  media_type?: number
+  start_timestamp?: number
+  end_timestamp?: number
+  total_packets?: number
+  packet_index?: number
+  received_packets?: number
+  media_total_size?: number
+  chunk_length?: number
+  received_media_size?: number
+  is_complete_media?: boolean
+  source_file_name?: string
   error_message?: string
   person_count?: number
   animal_count?: number
@@ -57,6 +78,7 @@ export interface UploadStreamRecord {
   cam_id: number
   camera_id?: string
   track_id?: number
+  face_id?: number
   protocol_id: 101 | 102 | 103
   timestamp: number
   batch_id?: number
@@ -156,5 +178,17 @@ export function fetchUploadStreamCameraOptions(params?: { protocol?: 101 | 102 |
       protocol: params?.protocol
     }
   })
+}
+
+export function deleteProtocolMedia(params: { protocol: 103; record_id: number }) {
+  return request.delete<any, ApiResponse<{ record_id: number; deleted: boolean; path: string }>>(
+    '/charging-aiot-php/api/protocol-data/data-center/media-delete.php',
+    {
+      params: {
+        protocol: params.protocol,
+        record_id: params.record_id
+      }
+    }
+  )
 }
 

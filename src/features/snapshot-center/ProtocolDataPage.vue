@@ -3,13 +3,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import dayjs from 'dayjs'
 import * as echarts from 'echarts'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Histogram, PictureFilled, UserFilled, View, WarningFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
 import {
   fetchProtocolFrame,
   fetchUploadStreamCameraOptions,
   fetchUploadStreamRecords,
+  deleteProtocolMedia,
   type CameraOptionVO,
   type StreamRecord101Details,
   type StreamRecord102Details,
@@ -40,10 +41,13 @@ const imageTargetsMap = ref<Map<string, StreamRecord101Details['targets']>>(new 
 const imageTargetsByTimestampMap = ref<Map<string, StreamRecord101Details['targets']>>(new Map())
 const previewDialogVisible = ref(false)
 const previewImageUrl = ref('')
+const previewMediaType = ref<'image' | 'video'>('image')
 
 const trendChartRef = ref<HTMLDivElement>()
 const categoryChartRef = ref<HTMLDivElement>()
 const cameraChartRef = ref<HTMLDivElement>()
+const eventGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day'>('day')
+const receiveGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day'>('day')
 let trendChart: echarts.ECharts | null = null
 let categoryChart: echarts.ECharts | null = null
 let cameraChart: echarts.ECharts | null = null
@@ -84,14 +88,21 @@ const dedupeVisualTargets = (targets: StreamRecord101Details['targets']) => {
 
 const openPreviewDialog = (imageUrl: string) => {
   previewImageUrl.value = imageUrl
+  previewMediaType.value = 'image'
+  previewDialogVisible.value = true
+}
+
+const openVideoPreviewDialog = (videoUrl: string) => {
+  previewImageUrl.value = videoUrl
+  previewMediaType.value = 'video'
   previewDialogVisible.value = true
 }
 
 const protocolInfo = computed(() => {
   if (protocol.value === 101) {
     return {
-      title: '101 目标检测数据',
-      desc: '按目标、坐标、置信度和原始协议帧追踪检测结果',
+      title: '101 人脸坐标数据',
+      desc: '按人脸编号、分辨率、坐标、置信度和原始协议帧追踪检测结果',
       color: '#37b26c',
       icon: UserFilled
     }
@@ -99,14 +110,14 @@ const protocolInfo = computed(() => {
   if (protocol.value === 102) {
     return {
       title: '102 特征向量数据',
-      desc: '聚合向量维度、识别状态、特征文件与协议帧信息',
+      desc: '聚合人脸编号、向量维度、识别状态、特征文件与协议帧信息',
       color: '#e8a219',
       icon: Histogram
     }
   }
   return {
-    title: '103 抓拍图片数据',
-    desc: '展示图片状态，并按 camera+timestamp+frame_seq 优先关联 101 坐标进行可视化标注',
+    title: '103 媒体抓拍数据',
+    desc: '展示图片和视频抓拍结果，并显示媒体类型、关联人脸编号、分包与落盘状态',
     color: '#2f75ff',
     icon: PictureFilled
   }
@@ -114,12 +125,33 @@ const protocolInfo = computed(() => {
 
 const cameraText = (record: UploadStreamRecord) => record.camera_id || `cam${record.cam_id || '-'}`
 const formatTime = (timestamp: number) => (timestamp ? dayjs(timestamp).format('YYYY-MM-DD HH:mm:ss') : '--')
+const parseCreateTimeMs = (createTime: string) => {
+  if (!createTime) return 0
+  const ts = dayjs(createTime).valueOf()
+  return Number.isFinite(ts) ? ts : 0
+}
+const recordSortTs = (record: UploadStreamRecord) => {
+  const createTs = parseCreateTimeMs(record.create_time || '')
+  return createTs > 0 ? createTs : record.timestamp
+}
+const formatCreateTime = (createTime: string) => {
+  const ts = parseCreateTimeMs(createTime)
+  return ts > 0 ? dayjs(ts).format('YYYY-MM-DD HH:mm:ss') : '--'
+}
 
 const formatBytes = (value: number) => {
   if (!value) return '0 B'
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(2)} MB`
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${value} B`
+}
+
+const row101ResolutionText = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord101Details
+  const width = Number(details.frame_width || 0)
+  const height = Number(details.frame_height || 0)
+  if (width > 0 && height > 0) return `${width} × ${height}`
+  return '未上报'
 }
 
 const objTypeText = (objType?: number) => {
@@ -167,14 +199,49 @@ const parseTrackId = (value: unknown) => {
   return Number.isFinite(num) ? Math.trunc(num) : 0
 }
 
-const row103TrackId = (row: UploadStreamRecord) => {
-  const details = row.details as StreamRecord103Details & { tid?: unknown; track_id?: unknown }
-  const fromDetails = parseTrackId(details.tid ?? details.track_id)
+const rowFaceId = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord103Details & { tid?: unknown; track_id?: unknown; face_id?: unknown }
+  const fromDetails = parseTrackId(details.face_id ?? details.tid ?? details.track_id)
   if (fromDetails > 0) return fromDetails
-  const fromRecord = parseTrackId((row as UploadStreamRecord & { track_id?: unknown }).track_id)
+  const rowLike = row as UploadStreamRecord & { track_id?: unknown; face_id?: unknown }
+  const fromRecord = parseTrackId(rowLike.face_id ?? rowLike.track_id)
   if (fromRecord > 0) return fromRecord
   const normalized = (row.normalized_json || {}) as Record<string, unknown>
-  return parseTrackId(normalized.track_id)
+  return parseTrackId(normalized.face_id ?? normalized.track_id)
+}
+
+const row103MissingPackets = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord103Details
+  const total = Number(details.total_packets || 0)
+  const received = Number(details.received_packets || 0)
+  return Math.max(0, total - received)
+}
+
+const row103MissingBytes = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord103Details
+  const total = Number(details.media_total_size || 0)
+  const received = Number(details.received_media_size || details.payload_size || 0)
+  return Math.max(0, total - received)
+}
+
+const row103StatusText = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord103Details
+  const raw = String(details.image_fetch_status || '').trim()
+  if (raw === 'success') return '完整'
+  if (raw === 'incomplete') {
+    const missingPackets = row103MissingPackets(row)
+    const missingBytes = row103MissingBytes(row)
+    return `不完整${missingPackets > 0 ? `，缺 ${missingPackets} 片` : ''}${missingBytes > 0 ? `，缺 ${formatBytes(missingBytes)}` : ''}`
+  }
+  if (raw === 'binary_only') return '仅二进制'
+  return raw || '--'
+}
+
+const row103StatusTagType = (row: UploadStreamRecord) => {
+  const status = String((row.details as StreamRecord103Details).image_fetch_status || '').trim()
+  if (status === 'success') return 'success'
+  if (status === 'incomplete') return 'danger'
+  return 'warning'
 }
 
 const rowHasError = (row: UploadStreamRecord) => {
@@ -273,6 +340,13 @@ const qualityTagType = (state: QualityState) => {
   return 'success'
 }
 
+const normalizeQualityState = (value: unknown): QualityState | null => {
+  if (value === 'normal' || value === 'error' || value === 'missing' || value === 'error_missing') {
+    return value
+  }
+  return null
+}
+
 const filteredRecords = computed(() => {
   return records.value
 })
@@ -284,11 +358,20 @@ const mergedRecordIds = (row: UploadStreamRecord) => {
 }
 
 const mergedQualityState = (row: UploadStreamRecord): QualityState => {
+  const directState = normalizeQualityState(row.quality_status)
+  if (directState) return directState
+
+  const rowStateById = new Map<number, QualityState>()
+  records.value.forEach((item) => {
+    const state = normalizeQualityState(item.quality_status)
+    if (state) rowStateById.set(item.record_id, state)
+  })
+
   const ids = mergedRecordIds(row)
   let hasError = false
   let hasMissing = false
   ids.forEach((id) => {
-    const state = tableQuality.value.stateMap.get(`${row.protocol_id}-${id}`) || 'normal'
+    const state = rowStateById.get(id) || tableQuality.value.stateMap.get(`${row.protocol_id}-${id}`) || 'normal'
     if (state === 'error' || state === 'error_missing') hasError = true
     if (state === 'missing' || state === 'error_missing') hasMissing = true
   })
@@ -321,8 +404,17 @@ const tableDisplayRecords = computed(() => {
     const first = sortedRows[0]
     const allTargets = dedupeVisualTargets(sortedRows.flatMap((row) => (row.details as StreamRecord101Details).targets || []))
     const details = first.details as StreamRecord101Details
+    const mergedStates = sortedRows.map((row) => normalizeQualityState(row.quality_status)).filter((state): state is QualityState => state !== null)
+    let mergedBackendState: QualityState | null = null
+    if (mergedStates.includes('error_missing')) mergedBackendState = 'error_missing'
+    else if (mergedStates.includes('error') && mergedStates.includes('missing')) mergedBackendState = 'error_missing'
+    else if (mergedStates.includes('error')) mergedBackendState = 'error'
+    else if (mergedStates.includes('missing')) mergedBackendState = 'missing'
+    else if (mergedStates.includes('normal')) mergedBackendState = 'normal'
+
     const mergedRow: UploadStreamRecord = {
       ...first,
+      quality_status: mergedBackendState || first.quality_status,
       details: {
         ...details,
         count: allTargets.length || Number(details.count || 0),
@@ -338,7 +430,7 @@ const tableDisplayRecords = computed(() => {
     mergedRows.push(mergedRow)
   })
 
-  return mergedRows.sort((a, b) => b.timestamp - a.timestamp || b.record_id - a.record_id)
+  return mergedRows.sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp || b.record_id - a.record_id)
 })
 
 const tableRowClassName = ({ row }: { row: UploadStreamRecord }) => {
@@ -355,6 +447,10 @@ const statCards = computed(() => {
   const batchSet = new Set(all.map((item) => item.batch_id).filter(Boolean))
   const latest = all[0]
   const earliest = all.length ? all[all.length - 1] : null
+  const latestReceived = [...all]
+    .map((item) => ({ item, receivedTs: parseCreateTimeMs(item.create_time || '') }))
+    .filter((entry) => entry.receivedTs > 0)
+    .sort((a, b) => b.receivedTs - a.receivedTs)[0] || null
   const activeDays = new Set(all.map((item) => dayjs(item.timestamp).format('YYYY-MM-DD')))
   const latestActiveDate = latest ? dayjs(latest.timestamp).format('YYYY-MM-DD') : '--'
   const avgPerBatch = batchSet.size > 0 ? Math.round(all.length / batchSet.size) : 0
@@ -365,16 +461,18 @@ const statCards = computed(() => {
     const personTotal = all.filter((item) => Number((item.details as StreamRecord101Details).obj_type ?? (item.details as StreamRecord101Details).targets?.[0]?.type) === 0).length
     const trackSet = new Set(all.flatMap((item) => (item.details as StreamRecord101Details).targets.map((target) => target.tid)))
     return [
-      { label: '总记录', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram },
-      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera },
-      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera },
-      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram },
-      { label: '目标数量', value: targetTotal, sub: `轨迹 ${trackSet.size}`, icon: UserFilled },
-      { label: '人员记录', value: personTotal, sub: `非人 ${Math.max(0, aggregateTotal.value - personTotal)}`, icon: UserFilled },
-      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled },
-      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled },
-      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon },
-      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon }
+      { label: '目标明细行数', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 101 表中的目标明细总行数，反映全量坐标记录规模；副标题展示当前分页加载到前端的数据量。' },
+      { label: '关键帧数', value: new Set(all.map((item) => buildFrameLinkKey(item))).size, sub: '按 camera+timestamp+frame_seq 去重', icon: Camera, explain: '按摄像头、事件时间和帧序号合并去重后的关键帧数量，用来衡量真实帧级事件规模。' },
+      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 统计的推送批次数，用来观察发送端批量聚合后的上传频率与规模。' },
+      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '当前统计范围内产生 101 数据的摄像头数量，副标题给出每个摄像头平均贡献的记录数。' },
+      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '按事件时间去重后的活跃日期数，适合观察该协议在更长时间范围内是否持续上报。' },
+      { label: '目标数量', value: targetTotal, sub: `轨迹 ${trackSet.size}`, icon: UserFilled, explain: '各帧内目标数累计结果，副标题中的轨迹数用于表示关联的人脸或跟踪对象规模。' },
+      { label: '人员记录', value: personTotal, sub: `非人 ${Math.max(0, aggregateTotal.value - personTotal)}`, icon: UserFilled, explain: '根据目标类型识别为“人”的记录数量，用于区分人像数据与其他类型目标。' },
+      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled, explain: '质检中判定为出错的记录数，通常表示帧结构异常、重复序号或媒体/字段异常。' },
+      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '依据同批次帧序号推断出的缺失关联记录数，副标题展示推算出的缺失帧数量。' },
+      { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台数据库最近写入该协议记录的时间，反映接收端最后一次真正收到并落库的时刻。' },
+      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备上报的最新事件时间，表示现场最新发生的协议事件，而不是平台接收时间。' },
+      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前统计区间内最早的一条事件时间，用来界定这批全量统计覆盖的起始范围。' }
     ]
   }
 
@@ -382,54 +480,88 @@ const statCards = computed(() => {
     const bytes = all.reduce((sum, item) => sum + Number((item.details as StreamRecord102Details).payload_size || 0), 0)
     const recognized = all.filter((item) => Boolean((item.details as StreamRecord102Details).person_name)).length
     return [
-      { label: '总记录', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram },
-      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera },
-      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera },
-      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram },
-      { label: '向量大小', value: formatBytes(bytes), sub: '全量累计', icon: protocolInfo.value.icon },
-      { label: '人员命中', value: recognized, sub: `未命中 ${aggregateTotal.value - recognized}`, icon: UserFilled },
-      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled },
-      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled },
-      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon },
-      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon }
+      { label: '总记录', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 102 协议记录总数，反映特征向量上报总规模；副标题为当前列表页已加载的记录数。' },
+      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 聚合后的批次总量，用于判断向量上传是否集中在少量大包还是分散小包。' },
+      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '在当前筛选范围内实际参与上传 102 数据的摄像头数量。' },
+      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '按事件时间分布去重后的活跃日期数，可辅助判断向量数据是否连续稳定产出。' },
+      { label: '向量大小', value: formatBytes(bytes), sub: '全量累计', icon: protocolInfo.value.icon, explain: '102 协议载荷大小累计值，代表特征向量数据在当前统计范围内占用的总字节量。' },
+      { label: '人员命中', value: recognized, sub: `未命中 ${aggregateTotal.value - recognized}`, icon: UserFilled, explain: '已命中人员信息的向量记录数，通常可用于判断识别链路是否真正关联到了库中人员。' },
+      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled, explain: '质检中识别为结构、顺序或字段异常的 102 记录数量。' },
+      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '通过帧序列连续性推算出的缺失记录，用于判断发送端或接收链路是否有漏报。' },
+      { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台最近成功接收到一条 102 记录并落库的时间。' },
+      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次触发 102 协议事件的时间点。' },
+      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前全量统计中最早的一条 102 事件时间。' }
     ]
   }
 
   const imageBytes = all.reduce((sum, item) => sum + Number((item.details as StreamRecord103Details).payload_size || 0), 0)
   const success = all.filter((item) => (item.details as StreamRecord103Details).image_fetch_status === 'success').length
+  const incomplete = all.filter((item) => (item.details as StreamRecord103Details).image_fetch_status === 'incomplete').length
   return [
-    { label: '总记录', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram },
-    { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera },
-    { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera },
-    { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram },
-    { label: '图片大小', value: formatBytes(imageBytes), sub: '全量累计', icon: protocolInfo.value.icon },
-    { label: '下载成功', value: success, sub: `异常 ${aggregateTotal.value - success}`, icon: PictureFilled },
-    { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '含图片下载失败', icon: WarningFilled },
-    { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled },
-    { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon },
-    { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon }
+    { label: '媒体记录数', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '103 协议媒体记录总数，表示图片或视频抓拍事件在当前统计范围内的规模。' },
+    { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按发送批次聚合后的媒体上传次数，用于观察抓拍文件在发送端的打包与推送节奏。' },
+    { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '实际产生媒体抓拍数据的摄像头数量。' },
+    { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '媒体事件涉及的活跃日期数，用于判断抓拍数据的持续覆盖范围。' },
+    { label: '媒体大小', value: formatBytes(imageBytes), sub: '全量累计', icon: protocolInfo.value.icon, explain: '当前统计范围内媒体载荷大小累计值，反映图片/视频传输的总体体量。' },
+    { label: '媒体就绪', value: success, sub: `不完整 ${incomplete}，其他异常 ${Math.max(0, aggregateTotal.value - success - incomplete)}`, icon: PictureFilled, explain: '状态为 success 的媒体记录数量；副标题同时给出不完整媒体和其他异常媒体的数量。' },
+    { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '含媒体落盘/读取异常', icon: WarningFilled, explain: '媒体落盘、拼接、读取或结构解析异常的记录数。' },
+    { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '通过帧序或分片关联推断出的缺失记录数，适合定位上传过程中的漏片或漏报。' },
+    { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台最近接收到并写入一条 103 记录的时间。' },
+    { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次产生媒体抓拍事件的时间。' },
+    { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前全量媒体统计中最早的一次事件时间。' }
   ]
 })
 
-const timelineData = computed(() => {
-  const map = new Map<string, number>()
-  aggregateRecords.value.forEach((item) => {
-    const key = dayjs(item.timestamp).format('YYYY-MM-DD')
-    map.set(key, (map.get(key) || 0) + 1)
+const buildTimeBucket = (timestamp: number, granularity: 'year' | 'quarter' | 'month' | 'week' | 'day') => {
+  const source = dayjs(timestamp)
+  if (!source.isValid()) return null
+  if (granularity === 'year') {
+    return { sort: source.startOf('year').valueOf(), label: source.format('YYYY年') }
+  }
+  if (granularity === 'quarter') {
+    const quarter = Math.floor(source.month() / 3) + 1
+    const startMonth = (quarter - 1) * 3
+    return { sort: source.month(startMonth).startOf('month').valueOf(), label: `${source.format('YYYY')} Q${quarter}` }
+  }
+  if (granularity === 'month') {
+    return { sort: source.startOf('month').valueOf(), label: source.format('YYYY-MM') }
+  }
+  if (granularity === 'week') {
+    const start = source.startOf('week')
+    return { sort: start.valueOf(), label: `${start.format('YYYY-MM-DD')}周` }
+  }
+  return { sort: source.startOf('day').valueOf(), label: source.format('YYYY-MM-DD') }
+}
+
+const aggregateTimeline = (
+  rows: UploadStreamRecord[],
+  timestampGetter: (row: UploadStreamRecord) => number,
+  granularity: 'year' | 'quarter' | 'month' | 'week' | 'day'
+) => {
+  const map = new Map<string, { sort: number; label: string; value: number }>()
+  rows.forEach((item) => {
+    const ts = timestampGetter(item)
+    if (!Number.isFinite(ts) || ts <= 0) return
+    const bucket = buildTimeBucket(ts, granularity)
+    if (!bucket) return
+    const current = map.get(bucket.label)
+    if (current) {
+      current.value += 1
+    } else {
+      map.set(bucket.label, { ...bucket, value: 1 })
+    }
   })
-  return [...map.entries()].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+  return [...map.values()]
+    .sort((a, b) => a.sort - b.sort)
+    .map((item) => [item.label, item.value] as [string, number])
+}
+
+const eventTimelineData = computed(() => {
+  return aggregateTimeline(aggregateRecords.value, (item) => Number(item.timestamp || 0), eventGranularity.value)
 })
 
-const todayTimelineData = computed(() => {
-  const today = dayjs().format('YYYY-MM-DD')
-  const map = new Map<string, number>()
-  aggregateRecords.value
-    .filter((item) => dayjs(item.timestamp).format('YYYY-MM-DD') === today)
-    .forEach((item) => {
-      const key = dayjs(item.timestamp).format('HH:mm')
-      map.set(key, (map.get(key) || 0) + 1)
-    })
-  return [...map.entries()].sort((a, b) => (a[0] > b[0] ? 1 : -1))
+const receiveTimelineData = computed(() => {
+  return aggregateTimeline(aggregateRecords.value, (item) => parseCreateTimeMs(item.create_time || ''), receiveGranularity.value)
 })
 
 const cameraDistributionData = computed(() => {
@@ -444,23 +576,28 @@ const cameraDistributionData = computed(() => {
     .slice(0, 12)
 })
 
-const rowTargets = (row: UploadStreamRecord) => {
-  const key = buildFrameLinkKey(row)
-  const timestampKey = `${cameraText(row)}_${row.timestamp}`
-  const allTargets = dedupeVisualTargets([
-    ...(imageTargetsMap.value.get(key) || []),
-    ...(imageTargetsByTimestampMap.value.get(timestampKey) || [])
-  ])
-  const trackId = row103TrackId(row)
-  if (trackId <= 0) return allTargets
-  const matched = allTargets.filter((target) => Number(target.tid) === trackId)
-  return matched.length ? matched : allTargets
-}
-
 const row101VisualTargets = (row: UploadStreamRecord) => {
   const details = row.details as StreamRecord101Details
   const targets = Array.isArray(details.targets) ? details.targets.filter(isVisualTarget) : []
   return targets
+}
+
+const row101FrameTargetCount = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord101Details
+  const count = Number(details.frame_target_count ?? details.target_count ?? details.count ?? 0)
+  return Number.isFinite(count) && count > 0 ? count : row101TargetCount(row)
+}
+
+const row101ExpandRows = (row: UploadStreamRecord) => {
+  return row101VisualTargets(row).map((target, index) => ({
+    index: index + 1,
+    faceId: target.face_id ?? target.tid ?? '--',
+    objectType: objTypeText(target.type),
+    coordinate: `(${target.x1}, ${target.y1}) - (${target.x2}, ${target.y2})`,
+    confidence: target.conf ?? '--',
+    boxSize: `${Math.max(0, Number(target.x2) - Number(target.x1))} × ${Math.max(0, Number(target.y2) - Number(target.y1))}`,
+    anchor: `${target.x1}, ${target.y1}`
+  }))
 }
 
 const row101TargetCount = (row: UploadStreamRecord) => {
@@ -487,50 +624,123 @@ const row102TargetCount = (row: UploadStreamRecord) => {
   return 1
 }
 
-const row103PersonCount = (row: UploadStreamRecord) => {
-  const linkedCount = rowTargets(row).length
-  if (linkedCount > 0) return linkedCount
+const rowFaceIdText = (row: UploadStreamRecord) => {
+  const value = Number(row.face_id || row.track_id || 0)
+  return Number.isFinite(value) && value > 0 ? String(value) : '--'
+}
+
+const rowFrameSeqText = (row: UploadStreamRecord) => {
+  const seq = parseRowSequence(row)
+  return seq === null ? '--' : String(seq)
+}
+
+const row102StatusText = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord102Details
+  return String(details.status || details.information || '').trim() || '--'
+}
+
+const row103CanPreview = (row: UploadStreamRecord) => {
   const details = row.details as StreamRecord103Details
-  const personCount = Number(details.person_count || 0)
-  return personCount > 0 ? personCount : 0
+  if (String(details.image_fetch_status || '').trim() === 'deleted') return false
+  if (String(details.local_image_path || '').trim() === '') return false
+  return String(details.image_data_url || '').trim() !== '' || String(details.media_url || '').trim() !== ''
+}
+
+const row103DownloadUrl = (row: UploadStreamRecord) => {
+  const details = row.details as StreamRecord103Details
+  const mediaUrl = String(details.media_url || '').trim()
+  if (!row103CanPreview(row) || mediaUrl === '') return ''
+  return `${mediaUrl}${mediaUrl.includes('?') ? '&' : '?'}download=1`
+}
+
+const deleteMediaRow = async (row: UploadStreamRecord) => {
+  await ElMessageBox.confirm(`确认删除记录 ${row.record_id} 对应的媒体文件吗？该操作会同步更新数据库中的媒体路径。`, '删除媒体', {
+    type: 'warning',
+    confirmButtonText: '确认删除',
+    cancelButtonText: '取消'
+  })
+  await deleteProtocolMedia({ protocol: 103, record_id: row.record_id })
+  ElMessage.success('媒体文件已删除')
+  await resetAndReloadAll()
 }
 
 const renderCharts = async () => {
   await nextTick()
   if (trendChartRef.value) {
     trendChart = trendChart || echarts.init(trendChartRef.value)
+    const eventRows = eventTimelineData.value.length ? eventTimelineData.value : [['暂无数据', 0] as [string, number]]
+    const eventValues = eventRows.map(([, count]) => count)
     trendChart.setOption({
-      grid: { left: 36, right: 16, top: 28, bottom: 28 },
-      tooltip: { trigger: 'axis' },
-      xAxis: { type: 'category', data: timelineData.value.map(([date]) => date), axisLine: { lineStyle: { color: '#8ba6d6' } } },
-      yAxis: { type: 'value', splitLine: { lineStyle: { color: 'rgba(139,166,214,.18)' } } },
-      series: [{ type: 'line', smooth: true, areaStyle: {}, data: timelineData.value.map(([, count]) => count), color: protocolInfo.value.color }]
+      grid: { left: 44, right: 20, top: 22, bottom: 42 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      xAxis: {
+        type: 'category',
+        data: eventRows.map(([date]) => date),
+        axisLine: { lineStyle: { color: '#8ba6d6' } },
+        axisLabel: { color: '#557099', interval: 0, rotate: eventRows.length > 10 ? 25 : 0 }
+      },
+      yAxis: {
+        type: 'value',
+        name: '记录数',
+        nameTextStyle: { color: '#6f83a5' },
+        splitLine: { lineStyle: { color: 'rgba(139,166,214,.18)' } },
+        axisLabel: { color: '#6f83a5' }
+      },
+      series: [
+        {
+          type: 'bar',
+          barMaxWidth: 34,
+          data: eventValues,
+          itemStyle: {
+            borderRadius: [10, 10, 0, 0],
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: protocolInfo.value.color },
+              { offset: 1, color: 'rgba(91, 143, 249, 0.18)' }
+            ])
+          }
+        },
+        {
+          type: 'line',
+          smooth: true,
+          symbolSize: 8,
+          data: eventValues,
+          lineStyle: { width: 3, color: protocolInfo.value.color },
+          itemStyle: { color: '#ffffff', borderColor: protocolInfo.value.color, borderWidth: 2 },
+          z: 3
+        }
+      ]
     })
   }
   if (categoryChartRef.value) {
     categoryChart = categoryChart || echarts.init(categoryChartRef.value)
-    const todayRows = todayTimelineData.value.length ? todayTimelineData.value : [['暂无数据', 0] as [string, number]]
+    const receiveRows = receiveTimelineData.value.length ? receiveTimelineData.value : [['暂无数据', 0] as [string, number]]
+    const receiveValues = receiveRows.map(([, value]) => value)
     categoryChart.setOption({
-      grid: { left: 40, right: 16, top: 30, bottom: 52 },
+      grid: { left: 44, right: 20, top: 22, bottom: 56 },
       tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
-        data: todayRows.map(([time]) => time),
+        data: receiveRows.map(([time]) => time),
         axisLine: { lineStyle: { color: '#8ba6d6' } },
-        axisLabel: { color: '#557099', interval: 0, rotate: todayRows.length > 12 ? 25 : 0 }
+        axisLabel: { color: '#557099', interval: 0, rotate: receiveRows.length > 10 ? 25 : 0 }
       },
       yAxis: {
         type: 'value',
+        name: '接收量',
+        nameTextStyle: { color: '#6f83a5' },
         splitLine: { lineStyle: { color: 'rgba(139,166,214,.18)' } },
         axisLabel: { color: '#6f83a5' }
       },
       series: [{
         type: 'line',
-        smooth: true,
-        areaStyle: {},
-        data: todayRows.map(([, value]) => value),
+        smooth: false,
+        step: 'middle',
+        areaStyle: {
+          color: 'rgba(91, 143, 249, 0.12)'
+        },
+        data: receiveValues,
         itemStyle: { color: protocolInfo.value.color },
-        lineStyle: { width: 2 },
+        lineStyle: { width: 3 },
         label: { show: true, position: 'top', color: '#4c6488', formatter: '{c}' }
       }]
     })
@@ -539,7 +749,7 @@ const renderCharts = async () => {
     cameraChart = cameraChart || echarts.init(cameraChartRef.value)
     const cameraRows = cameraDistributionData.value.length ? cameraDistributionData.value : [{ name: '暂无数据', value: 0 }]
     cameraChart.setOption({
-      grid: { left: 110, right: 24, top: 20, bottom: 24 },
+      grid: { left: 110, right: 32, top: 24, bottom: 24 },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       xAxis: {
         type: 'value',
@@ -555,7 +765,13 @@ const renderCharts = async () => {
       series: [{
         type: 'bar',
         data: cameraRows.map((item) => item.value),
-        itemStyle: { color: '#5b8ff9', borderRadius: [0, 6, 6, 0] },
+        itemStyle: {
+          borderRadius: [0, 10, 10, 0],
+          color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+            { offset: 0, color: protocolInfo.value.color },
+            { offset: 1, color: 'rgba(91, 143, 249, 0.18)' }
+          ])
+        },
         label: { show: true, position: 'right', color: '#4c6488' }
       }]
     })
@@ -726,6 +942,10 @@ watch(aggregateRecords, async () => {
   await renderCharts()
 }, { deep: true })
 
+watch([eventGranularity, receiveGranularity], async () => {
+  await renderCharts()
+})
+
 onMounted(async () => {
   await loadCameraOptions()
   await resetAndReloadAll()
@@ -761,12 +981,16 @@ onUnmounted(() => {
     </section>
 
     <div class="stat-grid">
-      <div v-for="card in statCards" :key="card.label" class="stat-card">
+      <div v-for="card in statCards" :key="card.label" class="stat-card explain-card">
         <el-icon><component :is="card.icon" /></el-icon>
-        <div>
+        <div class="stat-card-content">
           <span>{{ card.label }}</span>
           <strong>{{ card.value }}</strong>
           <small>{{ card.sub }}</small>
+        </div>
+        <div class="hover-panel">
+          <div class="hover-title">{{ card.label }}</div>
+          <div class="hover-text">{{ card.explain }}</div>
         </div>
       </div>
     </div>
@@ -774,19 +998,52 @@ onUnmounted(() => {
     <el-row :gutter="18" class="chart-row">
       <el-col :xl="16" :lg="15" :md="24">
         <el-card shadow="never" class="panel-card">
-          <template #header>按天统计数据量（全量）</template>
+          <template #header>
+            <div class="chart-header">
+              <div class="chart-header-copy">
+                <span>按事件时间统计</span>
+                <small>按设备事件发生时间聚合记录量</small>
+              </div>
+              <el-radio-group v-model="eventGranularity" size="small">
+                <el-radio-button label="year">年</el-radio-button>
+                <el-radio-button label="quarter">季</el-radio-button>
+                <el-radio-button label="month">月</el-radio-button>
+                <el-radio-button label="week">周</el-radio-button>
+                <el-radio-button label="day">日</el-radio-button>
+              </el-radio-group>
+            </div>
+          </template>
           <div ref="trendChartRef" class="chart"></div>
         </el-card>
       </el-col>
       <el-col :xl="8" :lg="9" :md="24">
         <el-card shadow="never" class="panel-card">
-          <template #header>当日按时间趋势</template>
+          <template #header>
+            <div class="chart-header">
+              <div class="chart-header-copy">
+                <span>按接收时间统计</span>
+                <small>按平台写库时间观察接收节奏</small>
+              </div>
+              <el-radio-group v-model="receiveGranularity" size="small">
+                <el-radio-button label="year">年</el-radio-button>
+                <el-radio-button label="quarter">季</el-radio-button>
+                <el-radio-button label="month">月</el-radio-button>
+                <el-radio-button label="week">周</el-radio-button>
+                <el-radio-button label="day">日</el-radio-button>
+              </el-radio-group>
+            </div>
+          </template>
           <div ref="categoryChartRef" class="chart"></div>
         </el-card>
       </el-col>
     </el-row>
     <el-card shadow="never" class="panel-card camera-chart-card">
-      <template #header>按摄像头归类统计（全量）</template>
+      <template #header>
+        <div class="chart-header-copy">
+          <span>按摄像头归类统计（全量）</span>
+          <small>展示记录量最高的前 12 个摄像头</small>
+        </div>
+      </template>
       <div ref="cameraChartRef" class="camera-chart"></div>
     </el-card>
 
@@ -830,9 +1087,39 @@ onUnmounted(() => {
             <el-button type="primary" @click="resetAndReloadTable">查询</el-button>
           </div>
         </div>
+        <div class="time-tip">
+          `事件时间（设备）` 表示协议帧中的设备上报时间；`接收时间（平台）` 表示该条记录写入平台数据库的时间。
+        </div>
       </template>
 
-      <el-table :data="tableDisplayRecords" height="520" stripe :row-class-name="tableRowClassName">
+      <el-table :data="tableDisplayRecords" :max-height="520" stripe :row-class-name="tableRowClassName">
+        <el-table-column v-if="protocol === 101" type="expand" width="56">
+          <template #default="{ row }">
+            <div class="expand-panel">
+              <div class="expand-head">
+                <div class="expand-title">目标明细</div>
+                <div class="expand-subtitle">同一关键帧下的每个目标拆开展示，避免主表单行过高</div>
+              </div>
+              <el-table :data="row101ExpandRows(row)" size="small" class="nested-table" stripe>
+                <el-table-column prop="index" label="#" width="56" />
+                <el-table-column label="人脸编号" width="170">
+                  <template #default="{ row: subRow }">
+                    <span class="detail-chip">{{ subRow.faceId }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="目标类型" width="110">
+                  <template #default="{ row: subRow }">
+                    <span class="detail-chip ghost-chip">{{ subRow.objectType }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="coordinate" label="坐标" width="180" show-overflow-tooltip />
+                <el-table-column prop="boxSize" label="框大小" width="120" />
+                <el-table-column prop="anchor" label="左上角" width="110" />
+                <el-table-column prop="confidence" label="置信度" width="120" />
+              </el-table>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="ID" width="110">
           <template #default="{ row }">{{ rowDisplayId(row) }}</template>
         </el-table-column>
@@ -840,8 +1127,14 @@ onUnmounted(() => {
           <template #default="{ row }">{{ cameraText(row) }}</template>
         </el-table-column>
         <el-table-column prop="batch_id" label="批次" width="90" />
-        <el-table-column label="事件时间" width="180">
+        <el-table-column label="事件时间（设备）" width="180">
           <template #default="{ row }">{{ formatTime(row.timestamp) }}</template>
+        </el-table-column>
+        <el-table-column label="接收时间（平台）" width="180">
+          <template #default="{ row }">{{ formatCreateTime(row.create_time) }}</template>
+        </el-table-column>
+        <el-table-column label="帧序号" width="90">
+          <template #default="{ row }">{{ rowFrameSeqText(row) }}</template>
         </el-table-column>
         <el-table-column label="质检状态" width="120">
           <template #default="{ row }">
@@ -852,43 +1145,46 @@ onUnmounted(() => {
         </el-table-column>
 
         <template v-if="protocol === 101">
-          <el-table-column label="目标个数" width="100">
+          <el-table-column label="帧内目标数" width="100">
+            <template #default="{ row }">{{ row101FrameTargetCount(row) }}</template>
+          </el-table-column>
+          <el-table-column label="当前明细数" width="100">
             <template #default="{ row }">{{ row101TargetCount(row) }}</template>
           </el-table-column>
           <el-table-column label="目标类型" width="100">
             <template #default="{ row }">{{ objTypeText(row101VisualTargets(row)[0]?.type ?? (row.details as StreamRecord101Details).obj_type) }}</template>
           </el-table-column>
-          <el-table-column label="目标ID" width="110">
-            <template #default="{ row }">{{ row101VisualTargets(row)[0]?.tid ?? '--' }}</template>
+          <!-- <el-table-column label="人脸编号" width="220" show-overflow-tooltip>
+            <template #default="{ row }">{{ row101TrackSummaryText(row) }}</template>
+          </el-table-column> -->
+          <el-table-column label="分辨率" width="150">
+            <template #default="{ row }">{{ row101ResolutionText(row) }}</template>
           </el-table-column>
-          <el-table-column label="坐标">
+          <!-- <el-table-column label="坐标明细" min-width="220">
             <template #default="{ row }">
-              <span v-for="target in row101VisualTargets(row)" :key="`${target.tid}-${target.object_index}`" class="mono">
-                ({{ target.x1 }},{{ target.y1 }})-({{ target.x2 }},{{ target.y2 }})
-              </span>
-              <span v-if="row101VisualTargets(row).length === 0">--</span>
+              <span class="expand-tip">{{ row101VisualTargets(row).length ? `展开查看 ${row101VisualTargets(row).length} 个目标坐标` : '--' }}</span>
             </template>
-          </el-table-column>
-          <el-table-column label="置信度" width="100">
-            <template #default="{ row }">{{ row101VisualTargets(row)[0]?.conf ?? '--' }}</template>
-          </el-table-column>
+          </el-table-column> -->
         </template>
 
         <template v-else-if="protocol === 102">
-          <el-table-column label="目标个数" width="100">
+          <el-table-column label="向量个数" width="100">
             <template #default="{ row }">{{ row102TargetCount(row) }}</template>
           </el-table-column>
           <el-table-column label="目标类型" width="100">
             <template #default="{ row }">{{ objTypeText((row.details as StreamRecord102Details).obj_type) }}</template>
           </el-table-column>
-          <el-table-column label="人员" width="130">
-            <template #default="{ row }">{{ (row.details as StreamRecord102Details).person_name || '--' }}</template>
+          <el-table-column label="人脸编号" width="110">
+            <template #default="{ row }">{{ rowFaceIdText(row) }}</template>
           </el-table-column>
-          <el-table-column label="状态" width="120">
-            <template #default="{ row }">{{ (row.details as StreamRecord102Details).status || '--' }}</template>
+          <el-table-column label="向量维度" width="110">
+            <template #default="{ row }">{{ (row.details as StreamRecord102Details).embedding_dim || '--' }}</template>
           </el-table-column>
-          <el-table-column label="维度/大小" width="150">
-            <template #default="{ row }">{{ (row.details as StreamRecord102Details).embedding_dim || 0 }} / {{ formatBytes((row.details as StreamRecord102Details).payload_size) }}</template>
+          <el-table-column label="载荷大小" width="120">
+            <template #default="{ row }">{{ formatBytes((row.details as StreamRecord102Details).payload_size) }}</template>
+          </el-table-column>
+          <el-table-column label="入库状态" width="120">
+            <template #default="{ row }">{{ row102StatusText(row) }}</template>
           </el-table-column>
           <el-table-column label="特征文件" show-overflow-tooltip>
             <template #default="{ row }">{{ (row.details as StreamRecord102Details).embedding_file_path || '--' }}</template>
@@ -896,33 +1192,81 @@ onUnmounted(() => {
         </template>
 
         <template v-else>
-          <el-table-column label="图片路径" min-width="300" show-overflow-tooltip>
+          <el-table-column label="媒体类型" width="100">
+            <template #default="{ row }">
+              {{ Number((row.details as StreamRecord103Details).media_type || (row.details as StreamRecord103Details).payload_type || 0) === 2 ? '视频' : '图片' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="关联人脸编号" width="120">
+            <template #default="{ row }">{{ rowFaceId(row) || '--' }}</template>
+          </el-table-column>
+          <el-table-column label="开始时间" width="180">
+            <template #default="{ row }">{{ formatTime((row.details as StreamRecord103Details).start_timestamp || row.timestamp) }}</template>
+          </el-table-column>
+          <el-table-column label="结束时间" width="180">
+            <template #default="{ row }">{{ formatTime((row.details as StreamRecord103Details).end_timestamp || row.timestamp) }}</template>
+          </el-table-column>
+          <el-table-column label="媒体路径" min-width="320" show-overflow-tooltip>
             <template #default="{ row }">
               <div class="path-col">
-                <span class="path-text">{{ (row.details as StreamRecord103Details).local_image_path || (row.details as StreamRecord103Details).frame_image_url || '--' }}</span>
+                <span class="path-text">{{ (row.details as StreamRecord103Details).local_image_path || (row.details as StreamRecord103Details).media_url || (row.details as StreamRecord103Details).frame_image_url || '--' }}</span>
                 <el-button
                   link
                   type="primary"
-                  :disabled="!(row.details as StreamRecord103Details).image_data_url"
-                  @click="openPreviewDialog((row.details as StreamRecord103Details).image_data_url)"
+                  :disabled="!row103CanPreview(row)"
+                  @click="(row.details as StreamRecord103Details).media_kind === 'video'
+                    ? openVideoPreviewDialog((row.details as StreamRecord103Details).media_url || '')
+                    : openPreviewDialog((row.details as StreamRecord103Details).image_data_url)"
                 >
                   预览
                 </el-button>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="120">
+          <el-table-column label="状态" width="220">
             <template #default="{ row }">
-              <el-tag :type="(row.details as StreamRecord103Details).image_fetch_status === 'success' ? 'success' : 'warning'">
-                {{ (row.details as StreamRecord103Details).image_fetch_status || '--' }}
+              <el-tag :type="row103StatusTagType(row)">
+                {{ row103StatusText(row) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="人/动物/车" width="140">
+          <el-table-column label="声明/实收分片" width="130">
             <template #default="{ row }">
-              {{ row103PersonCount(row) }} /
-              {{ (row.details as StreamRecord103Details).animal_count || 0 }} /
-              {{ (row.details as StreamRecord103Details).car_count || 0 }}
+              {{ (row.details as StreamRecord103Details).total_packets || 0 }} / {{ (row.details as StreamRecord103Details).received_packets || 0 }}
+            </template>
+          </el-table-column>
+          <el-table-column label="当前包序号" width="110">
+            <template #default="{ row }">{{ (row.details as StreamRecord103Details).packet_index || '--' }}</template>
+          </el-table-column>
+          <el-table-column label="声明/实收字节" width="160">
+            <template #default="{ row }">
+              {{ formatBytes((row.details as StreamRecord103Details).media_total_size || 0) }} / {{ formatBytes((row.details as StreamRecord103Details).received_media_size || (row.details as StreamRecord103Details).payload_size || 0) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="当前分包长度" width="120">
+            <template #default="{ row }">
+              {{ formatBytes((row.details as StreamRecord103Details).chunk_length || 0) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <a
+                v-if="(row.details as StreamRecord103Details).media_kind === 'video' && row103DownloadUrl(row)"
+                class="table-link"
+                :href="row103DownloadUrl(row)"
+                download
+              >
+                下载
+              </a>
+              <el-button
+                v-if="(row.details as StreamRecord103Details).media_kind === 'video'"
+                link
+                type="danger"
+                :disabled="!row103CanPreview(row)"
+                @click="deleteMediaRow(row)"
+              >
+                删除
+              </el-button>
             </template>
           </el-table-column>
         </template>
@@ -956,16 +1300,18 @@ onUnmounted(() => {
 
     <el-dialog
       v-model="previewDialogVisible"
-      title="抓拍图片预览"
+      title="103 媒体预览"
       width="78vw"
       align-center
       destroy-on-close
     >
       <CanvasDetectionImage
+        v-if="previewMediaType === 'image'"
         :image-url="previewImageUrl"
         :targets="[]"
         :height="560"
       />
+      <video v-else class="preview-video" :src="previewImageUrl" controls style="width:100%;max-height:70vh;background:#000" />
     </el-dialog>
   </div>
 </template>
@@ -974,7 +1320,15 @@ onUnmounted(() => {
 .protocol-page {
   min-height: 100%;
   padding: 18px;
-  background: #f0f2f5;
+  background:
+    radial-gradient(circle at 10% 6%, rgba(76, 125, 220, 0.08), transparent 30%),
+    linear-gradient(180deg, #eef3fb 0%, #f6f8fc 100%);
+}
+
+.time-tip {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #6b7c93;
 }
 
 .hero-card {
@@ -1013,20 +1367,36 @@ onUnmounted(() => {
 }
 
 .stat-grid {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 16px;
+  overflow: visible;
 }
 
 .stat-card {
+  position: relative;
   display: flex;
+  flex-direction: column;
   gap: 14px;
   align-items: center;
-  padding: 18px;
+  justify-content: center;
+  min-height: 172px;
+  padding: 22px 18px;
   border-radius: 16px;
+  text-align: center;
+  border: 1px solid rgba(91, 143, 249, 0.08);
   background: #fff;
   box-shadow: 0 10px 28px rgba(24, 42, 78, 0.08);
+  overflow: visible;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+  z-index: 30;
+  transform: translateY(-4px);
+  box-shadow: 0 18px 36px rgba(24, 42, 78, 0.14);
 }
 
 .stat-card .el-icon {
@@ -1035,6 +1405,12 @@ onUnmounted(() => {
   border-radius: 14px;
   color: #fff;
   background: linear-gradient(135deg, #5b8ff9, #35c2ff);
+}
+
+.stat-card-content {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
 }
 
 .stat-card span,
@@ -1050,6 +1426,54 @@ onUnmounted(() => {
   font-size: 22px;
 }
 
+.explain-card:hover .hover-panel {
+  transition-delay: 0.1s;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(10px);
+}
+
+.hover-panel {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: calc(100% - 4px);
+  z-index: 12;
+  padding: 14px;
+  border: 1px solid rgba(47, 117, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 36px rgba(24, 42, 78, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.hover-panel::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.98);
+  border-top: 1px solid rgba(47, 117, 255, 0.14);
+  border-left: 1px solid rgba(47, 117, 255, 0.14);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.hover-title {
+  margin-bottom: 10px;
+  color: #1f2f4d;
+  font-weight: 700;
+}
+
+.hover-text {
+  color: #587093;
+  line-height: 1.5;
+}
+
 .chart-row {
   margin-bottom: 16px;
 }
@@ -1057,6 +1481,31 @@ onUnmounted(() => {
 .panel-card {
   border: none;
   border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(24, 42, 78, 0.08);
+}
+
+.chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.chart-header span {
+  font-weight: 700;
+  color: #27405f;
+}
+
+.chart-header-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.chart-header-copy small {
+  color: #7b8fad;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .chart {
@@ -1089,6 +1538,54 @@ onUnmounted(() => {
   align-items: center;
   color: #7c8faa;
   font-size: 12px;
+}
+
+.expand-panel {
+  padding: 10px 14px 14px;
+  background: #f7faff;
+}
+
+.expand-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.expand-title {
+  color: #244266;
+  font-weight: 700;
+}
+
+.expand-subtitle {
+  color: #7a8ea9;
+  font-size: 12px;
+}
+
+.nested-table {
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.expand-tip {
+  color: #557099;
+}
+
+.detail-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: #245ea8;
+  background: #eaf3ff;
+}
+
+.ghost-chip {
+  color: #547193;
+  background: #f0f5fb;
 }
 
 .mono {
@@ -1128,6 +1625,16 @@ onUnmounted(() => {
   color: #4f6a8f;
 }
 
+.table-link {
+  margin-right: 10px;
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.table-link:hover {
+  color: var(--el-color-primary-light-3);
+}
+
 .pagination-wrap {
   display: flex;
   justify-content: flex-end;
@@ -1165,6 +1672,27 @@ onUnmounted(() => {
   background: #ffe9e6 !important;
 }
 
+:deep(.el-table__expanded-cell) {
+  padding: 0 !important;
+  background: #f7faff !important;
+}
+
+:deep(.nested-table),
+:deep(.nested-table::before),
+:deep(.nested-table .el-table__inner-wrapper::before) {
+  border: none !important;
+}
+
+:deep(.nested-table th.el-table__cell),
+:deep(.nested-table td.el-table__cell) {
+  border-bottom: none !important;
+}
+
+:deep(.nested-table .el-table__header th.el-table__cell) {
+  background: #f7fbff !important;
+  color: #496687;
+}
+
 @media (max-width: 1200px) {
   .stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1184,6 +1712,9 @@ onUnmounted(() => {
     flex-direction: column;
     align-items: stretch;
   }
+
+  .chart-header {
+    align-items: stretch;
+  }
 }
 </style>
-
