@@ -17,6 +17,7 @@ import {
   type StreamRecord103Details,
   type UploadStreamRecord
 } from '@/api/uploadStream'
+import { el } from 'element-plus/es/locale/index.mjs'
 
 type ProtocolId = 101 | 102 | 103
 
@@ -46,8 +47,10 @@ const previewMediaType = ref<'image' | 'video'>('image')
 const trendChartRef = ref<HTMLDivElement>()
 const categoryChartRef = ref<HTMLDivElement>()
 const cameraChartRef = ref<HTMLDivElement>()
-const eventGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day'>('day')
-const receiveGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day'>('day')
+const eventGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly'>('day')
+const receiveGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly'>('day')
+const eventHourlyDate = ref('')
+const receiveHourlyDate = ref('')
 let trendChart: echarts.ECharts | null = null
 let categoryChart: echarts.ECharts | null = null
 let cameraChart: echarts.ECharts | null = null
@@ -536,8 +539,48 @@ const buildTimeBucket = (timestamp: number, granularity: 'year' | 'quarter' | 'm
 const aggregateTimeline = (
   rows: UploadStreamRecord[],
   timestampGetter: (row: UploadStreamRecord) => number,
-  granularity: 'year' | 'quarter' | 'month' | 'week' | 'day'
+  granularity: 'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly',
+  hourlyDate = ''
 ) => {
+  if (granularity === 'hourly') {
+    const timedRows = rows
+      .map((item) => ({ item, ts: timestampGetter(item) }))
+      .filter((entry) => Number.isFinite(entry.ts) && entry.ts > 0)
+    if (!timedRows.length) return []
+
+    const selectedBase = hourlyDate ? dayjs(hourlyDate) : dayjs(Math.max(...timedRows.map((entry) => entry.ts)))
+    const dayStart = selectedBase.startOf('day')
+    const dayEnd = dayStart.add(1, 'day')
+    const bucketMap = new Map<string, { sort: number; label: string; value: number }>()
+
+    for (let hour = 0; hour < 24; hour += 1) {
+      const bucketStart = dayStart.add(hour, 'hour')
+      const bucketEnd = bucketStart.add(1, 'hour')
+      const label = `${bucketStart.format('HH:mm')}-${bucketEnd.format('HH:mm')}`
+      bucketMap.set(label, {
+        sort: bucketStart.valueOf(),
+        label,
+        value: 0
+      })
+    }
+
+    timedRows.forEach(({ ts }) => {
+      const point = dayjs(ts)
+      if (point.valueOf() < dayStart.valueOf() || point.valueOf() >= dayEnd.valueOf()) return
+      const bucketStart = dayStart.add(point.hour(), 'hour')
+      const bucketEnd = bucketStart.add(1, 'hour')
+      const label = `${bucketStart.format('HH:mm')}-${bucketEnd.format('HH:mm')}`
+      const current = bucketMap.get(label)
+      if (current) {
+        current.value += 1
+      }
+    })
+
+    return [...bucketMap.values()]
+      .sort((a, b) => a.sort - b.sort)
+      .map((item) => [item.label, item.value] as [string, number])
+  }
+
   const map = new Map<string, { sort: number; label: string; value: number }>()
   rows.forEach((item) => {
     const ts = timestampGetter(item)
@@ -557,12 +600,40 @@ const aggregateTimeline = (
 }
 
 const eventTimelineData = computed(() => {
-  return aggregateTimeline(aggregateRecords.value, (item) => Number(item.timestamp || 0), eventGranularity.value)
+  return aggregateTimeline(
+    aggregateRecords.value,
+    (item) => Number(item.timestamp || 0),
+    eventGranularity.value,
+    eventHourlyDate.value
+  )
 })
 
 const receiveTimelineData = computed(() => {
-  return aggregateTimeline(aggregateRecords.value, (item) => parseCreateTimeMs(item.create_time || ''), receiveGranularity.value)
+  return aggregateTimeline(
+    aggregateRecords.value,
+    (item) => parseCreateTimeMs(item.create_time || ''),
+    receiveGranularity.value,
+    receiveHourlyDate.value
+  )
 })
+
+const latestEventTimelineDayText = computed(() => {
+  const timestamps = aggregateRecords.value.map((item) => Number(item.timestamp || 0)).filter((item) => Number.isFinite(item) && item > 0)
+  if (!timestamps.length) return '--'
+  return dayjs(Math.max(...timestamps)).format('YYYY-MM-DD')
+})
+
+const latestReceiveTimelineDayText = computed(() => {
+  const timestamps = aggregateRecords.value
+    .map((item) => parseCreateTimeMs(item.create_time || ''))
+    .filter((item) => Number.isFinite(item) && item > 0)
+  if (!timestamps.length) return '--'
+  return dayjs(Math.max(...timestamps)).format('YYYY-MM-DD')
+})
+
+const eventHourlyDateText = computed(() => eventHourlyDate.value || latestEventTimelineDayText.value)
+const receiveHourlyDateText = computed(() => receiveHourlyDate.value || latestReceiveTimelineDayText.value)
+const stackedTimelineCharts = computed(() => eventGranularity.value === 'hourly' || receiveGranularity.value === 'hourly')
 
 const cameraDistributionData = computed(() => {
   const map = new Map<string, number>()
@@ -939,16 +1010,24 @@ watch([page, pageSize], async () => {
 })
 
 watch(aggregateRecords, async () => {
+  if (!eventHourlyDate.value && latestEventTimelineDayText.value !== '--') {
+    eventHourlyDate.value = latestEventTimelineDayText.value
+  }
+  if (!receiveHourlyDate.value && latestReceiveTimelineDayText.value !== '--') {
+    receiveHourlyDate.value = latestReceiveTimelineDayText.value
+  }
   await renderCharts()
 }, { deep: true })
 
-watch([eventGranularity, receiveGranularity], async () => {
+watch([eventGranularity, receiveGranularity, eventHourlyDate, receiveHourlyDate], async () => {
   await renderCharts()
 })
 
 onMounted(async () => {
   await loadCameraOptions()
   await resetAndReloadAll()
+  eventHourlyDate.value = latestEventTimelineDayText.value !== '--' ? latestEventTimelineDayText.value : ''
+  receiveHourlyDate.value = latestReceiveTimelineDayText.value !== '--' ? latestReceiveTimelineDayText.value : ''
   if ('ResizeObserver' in window) {
     resizeObserver = new ResizeObserver(() => {
       trendChart?.resize()
@@ -995,14 +1074,14 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <el-row :gutter="18" class="chart-row">
-      <el-col :xl="16" :lg="15" :md="24">
+    <el-row :gutter="18" class="chart-row" :class="{ 'chart-row-stacked': stackedTimelineCharts }">
+      <el-col :xl="stackedTimelineCharts ? 24 : 16" :lg="stackedTimelineCharts ? 24 : 15" :md="24">
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="chart-header">
               <div class="chart-header-copy">
                 <span>按事件时间统计</span>
-                <small>按设备事件发生时间聚合记录量</small>
+                <small>{{ eventGranularity === 'hourly' ? `展示 ${eventHourlyDateText} 当天每小时事件流量` : '按设备事件发生时间聚合记录量' }}</small>
               </div>
               <el-radio-group v-model="eventGranularity" size="small">
                 <el-radio-button label="year">年</el-radio-button>
@@ -1010,19 +1089,29 @@ onUnmounted(() => {
                 <el-radio-button label="month">月</el-radio-button>
                 <el-radio-button label="week">周</el-radio-button>
                 <el-radio-button label="day">日</el-radio-button>
+                <el-radio-button label="hourly">时刻</el-radio-button>
               </el-radio-group>
+              <el-date-picker
+                v-if="eventGranularity === 'hourly'"
+                v-model="eventHourlyDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="选择日期"
+                size="small"
+                style="width: 150px"
+              />
             </div>
           </template>
           <div ref="trendChartRef" class="chart"></div>
         </el-card>
       </el-col>
-      <el-col :xl="8" :lg="9" :md="24">
+      <el-col :xl="stackedTimelineCharts ? 24 : 8" :lg="stackedTimelineCharts ? 24 : 9" :md="24">
         <el-card shadow="never" class="panel-card">
           <template #header>
             <div class="chart-header">
               <div class="chart-header-copy">
                 <span>按接收时间统计</span>
-                <small>按平台写库时间观察接收节奏</small>
+                <small>{{ receiveGranularity === 'hourly' ? `展示 ${receiveHourlyDateText} 当天每小时接收流量` : '按平台写库时间观察接收节奏' }}</small>
               </div>
               <el-radio-group v-model="receiveGranularity" size="small">
                 <el-radio-button label="year">年</el-radio-button>
@@ -1030,7 +1119,17 @@ onUnmounted(() => {
                 <el-radio-button label="month">月</el-radio-button>
                 <el-radio-button label="week">周</el-radio-button>
                 <el-radio-button label="day">日</el-radio-button>
+                <el-radio-button label="hourly">时刻</el-radio-button>
               </el-radio-group>
+              <el-date-picker
+                v-if="receiveGranularity === 'hourly'"
+                v-model="receiveHourlyDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="选择日期"
+                size="small"
+                style="width: 150px"
+              />
             </div>
           </template>
           <div ref="categoryChartRef" class="chart"></div>
@@ -1210,16 +1309,6 @@ onUnmounted(() => {
             <template #default="{ row }">
               <div class="path-col">
                 <span class="path-text">{{ (row.details as StreamRecord103Details).local_image_path || (row.details as StreamRecord103Details).media_url || (row.details as StreamRecord103Details).frame_image_url || '--' }}</span>
-                <el-button
-                  link
-                  type="primary"
-                  :disabled="!row103CanPreview(row)"
-                  @click="(row.details as StreamRecord103Details).media_kind === 'video'
-                    ? openVideoPreviewDialog((row.details as StreamRecord103Details).media_url || '')
-                    : openPreviewDialog((row.details as StreamRecord103Details).image_data_url)"
-                >
-                  预览
-                </el-button>
               </div>
             </template>
           </el-table-column>
@@ -1248,16 +1337,29 @@ onUnmounted(() => {
               {{ formatBytes((row.details as StreamRecord103Details).chunk_length || 0) }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="150" fixed="right">
+          <el-table-column label="操作" width="210" fixed="right">
             <template #default="{ row }">
-              <a
-                v-if="(row.details as StreamRecord103Details).media_kind === 'video' && row103DownloadUrl(row)"
-                class="table-link"
-                :href="row103DownloadUrl(row)"
-                download
+              <el-button
+                link
+                type="primary"
+                :disabled="!row103CanPreview(row)"
+                @click="(row.details as StreamRecord103Details).media_kind === 'video'
+                  ? openVideoPreviewDialog((row.details as StreamRecord103Details).media_url || '')
+                  : openPreviewDialog((row.details as StreamRecord103Details).image_data_url)"
               >
-                下载
-              </a>
+                预览
+              </el-button>
+              <el-button link
+                type="primary">
+                <a
+                  v-if="(row.details as StreamRecord103Details).media_kind === 'video' && row103DownloadUrl(row)"
+                  class="table-link"
+                  :href="row103DownloadUrl(row)"
+                  download
+                >
+                  下载
+                </a>
+              </el-button>
               <el-button
                 v-if="(row.details as StreamRecord103Details).media_kind === 'video'"
                 link
@@ -1641,6 +1743,10 @@ onUnmounted(() => {
   padding-top: 14px;
 }
 
+.chart-row-stacked {
+  row-gap: 18px;
+}
+
 .frame-dialog-body {
   height: 44vh;
   overflow: auto;
@@ -1715,6 +1821,10 @@ onUnmounted(() => {
 
   .chart-header {
     align-items: stretch;
+  }
+
+  .chart-row-stacked {
+    row-gap: 12px;
   }
 }
 </style>
