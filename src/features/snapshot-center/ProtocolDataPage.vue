@@ -17,7 +17,6 @@ import {
   type StreamRecord103Details,
   type UploadStreamRecord
 } from '@/api/uploadStream'
-import { el } from 'element-plus/es/locale/index.mjs'
 
 type ProtocolId = 101 | 102 | 103
 
