@@ -134,6 +134,12 @@ export interface MonitorPlaybackListResult {
   records: MonitorPlaybackItem[]
 }
 
+export interface CleanupRecordingsResult {
+  scriptPath: string
+  exitCode: number
+  output: string[]
+}
+
 export interface GroupDeviceItem {
   deviceId: number
   deviceName: string
@@ -201,6 +207,10 @@ export function getMonitorPlaybackList(params?: {
   endTime?: string
 }) {
   return request.get<any, ApiResponse<MonitorPlaybackListResult>>('/charging-aiot-php/api/monitor-center/video-list/list.php', { params })
+}
+
+export function cleanupMonitorRecordings() {
+  return request.post<any, ApiResponse<CleanupRecordingsResult>>('/charging-aiot-php/api/monitor-center/video-list/cleanup-recordings.php')
 }
 
 // 鑾峰彇璁惧琛ㄥ崟鍥炴樉鍐呭

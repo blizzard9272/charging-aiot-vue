@@ -1,7 +1,7 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getMonitorPlaybackList, type MonitorPlaybackItem } from '@/api/device'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { cleanupMonitorRecordings, getMonitorPlaybackList, type MonitorPlaybackItem } from '@/api/device'
 
 interface FolderNode {
   id: string
@@ -16,7 +16,10 @@ const QUERY_CHUNK = 200
 const allPlaybackList = ref<MonitorPlaybackItem[]>([])
 const coverMap = ref<Record<number, string>>({})
 const loading = ref(false)
+const cleanupLoading = ref(false)
 const selectedFolderPath = ref('')
+const cleanupOutput = ref<string[]>([])
+const cleanupDialogVisible = ref(false)
 
 const filterForm = reactive({
   videoName: '',
@@ -169,6 +172,33 @@ const handleReset = () => {
 const handleRefresh = () => {
   pageState.currentPage = 1
   loadPlaybackList()
+}
+
+const handleCleanupRecordings = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '将执行服务器上的录像清理脚本，只清理 cam1-cam4 的录制文件，不处理其他手工导入测试文件。是否继续？',
+      '确认清理录像',
+      {
+        type: 'warning',
+        confirmButtonText: '立即清理',
+        cancelButtonText: '取消'
+      }
+    )
+  } catch (_error) {
+    return
+  }
+
+  cleanupLoading.value = true
+  try {
+    const res = await cleanupMonitorRecordings()
+    cleanupOutput.value = Array.isArray(res.data?.output) ? res.data.output : []
+    cleanupDialogVisible.value = true
+    ElMessage.success(res.msg || '录像清理完成')
+    await loadPlaybackList()
+  } finally {
+    cleanupLoading.value = false
+  }
 }
 
 const handleFolderSelect = (node: FolderNode) => {
@@ -359,6 +389,7 @@ watch(
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
           <el-button @click="handleRefresh">刷新列表</el-button>
+          <el-button type="danger" plain :loading="cleanupLoading" @click="handleCleanupRecordings">清理 cam1-cam4 录像</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -452,6 +483,14 @@ watch(
           @loadedmetadata="handleVideoLoadedMetadata"
         />
       </div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="cleanupDialogVisible"
+      title="清理结果"
+      width="720px"
+    >
+      <pre class="cleanup-output">{{ cleanupOutput.join('\n') || '脚本未返回输出' }}</pre>
     </el-dialog>
   </div>
 </template>
@@ -576,6 +615,20 @@ watch(
   object-fit: cover;
   display: block;
   background: transparent;
+}
+
+.cleanup-output {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  border-radius: 12px;
+  background: #111827;
+  color: #e5e7eb;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 :deep(.playback-dialog .el-dialog__body) {
