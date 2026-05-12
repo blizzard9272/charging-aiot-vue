@@ -205,6 +205,19 @@ export interface UploadStreamAggregateVO {
   camera_distribution: UploadStreamCameraDistributionItem[]
 }
 
+export interface UploadStreamOverviewVO {
+  protocol_totals: Record<101 | 102 | 103, number>
+  summary: {
+    total_records: number
+    camera_count: number
+    target_count: number
+    vector_bytes: number
+    image_success: number
+    latest_event_time: number
+    latest_received_time: string
+  }
+}
+
 export interface ProtocolFrameVO {
   protocol_id: 101 | 102 | 103
   record_id: number
@@ -233,6 +246,10 @@ export function fetchUploadStreamAggregate(params: UploadStreamAggregateQuery) {
   return request.get<any, ApiResponse<UploadStreamAggregateVO>>('/charging-aiot-php/api/protocol-data/data-center/aggregate.php', {
     params
   })
+}
+
+export function fetchUploadStreamOverview() {
+  return request.get<any, ApiResponse<UploadStreamOverviewVO>>('/charging-aiot-php/api/protocol-data/data-center/overview.php')
 }
 
 export function fetchProtocolFrame(params: { protocol: 101 | 102 | 103; record_id: number }) {

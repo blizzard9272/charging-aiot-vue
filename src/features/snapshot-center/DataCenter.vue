@@ -7,7 +7,9 @@ import { ElMessage } from 'element-plus'
 import { Connection, DataLine, PictureFilled, UserFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
 import {
+  fetchUploadStreamOverview,
   fetchUploadStreamRecords,
+  type UploadStreamOverviewVO,
   type LinkedStreamPacket,
   type StreamRecord101Details,
   type StreamRecord102Details,
@@ -43,6 +45,7 @@ const isConnected = ref(false)
 const reconnecting = ref(false)
 const lastPushEventTime = ref<number | null>(null)
 const lastPushReceivedTime = ref<number | null>(null)
+const overview = ref<UploadStreamOverviewVO | null>(null)
 
 const records = ref<UploadStreamRecord[]>([])
 const capturePreviewRecords = ref<UploadStreamRecord[]>([])
@@ -145,6 +148,16 @@ const activeCameraList = computed(() => {
   return [...new Set(records.value.map((item) => cameraText(item)).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
 
+const overviewSummary = computed(() => overview.value?.summary || {
+  total_records: 0,
+  camera_count: 0,
+  target_count: 0,
+  vector_bytes: 0,
+  image_success: 0,
+  latest_event_time: 0,
+  latest_received_time: ''
+})
+
 const stats = computed(() => {
   const targetCount = records.value
     .filter((item) => item.protocol_id === 101)
@@ -171,7 +184,7 @@ const cached101Rows = computed(() => records.value.filter((item) => item.protoco
 const total101Rows = computed(() => protocolTotals.value[101] || 0)
 const uncached101Rows = computed(() => Math.max(0, total101Rows.value - cached101Rows.value))
 const cachePolicyText = computed(() => {
-  return `页面启动时最多拉取最近 ${MAX_CACHE_RECORDS} 条记录，之后用 WebSocket 增量合并；101 卡片展示的是目标明细行数，不是关键帧数。`
+  return `首页摘要由后端直接聚合，页面启动时仅缓存最近 ${MAX_CACHE_RECORDS} 条记录，之后用 WebSocket 增量合并；101 卡片展示的是目标明细行数，不是关键帧数。`
 })
 const keyframePolicyText = computed(() => {
   if (linkMode.value === 'loose') {
@@ -305,7 +318,7 @@ const protocolCards = computed(() => [
     protocol: 101,
     title: '目标检测',
     total: protocolTotals.value[101] || 0,
-    desc: `坐标明细 ${protocolTotals.value[101] || 0}，缓存人脸 ${stats.value.targetCount}`,
+    desc: `坐标明细 ${protocolTotals.value[101] || 0}，总目标 ${overviewSummary.value.target_count}`,
     icon: UserFilled,
     color: '#37b26c',
     path: '/snapshot-center/data-center/101',
@@ -315,7 +328,7 @@ const protocolCards = computed(() => [
     protocol: 102,
     title: '特征向量',
     total: protocolTotals.value[102] || 0,
-    desc: `当前缓存 ${(stats.value.vectorBytes / 1024).toFixed(1)} KB`,
+    desc: `总向量 ${(overviewSummary.value.vector_bytes / 1024).toFixed(1)} KB`,
     icon: DataLine,
     color: '#e8a219',
     path: '/snapshot-center/data-center/102',
@@ -325,7 +338,7 @@ const protocolCards = computed(() => [
     protocol: 103,
     title: '媒体抓拍',
     total: protocolTotals.value[103] || 0,
-    desc: `成功落媒体 ${stats.value.imageSuccess}`,
+    desc: `成功落媒体 ${overviewSummary.value.image_success}`,
     icon: PictureFilled,
     color: '#2f75ff',
     path: '/snapshot-center/data-center/103',
@@ -735,11 +748,28 @@ const loadCapturePreviews = async () => {
     .slice(0, CAPTURE_PREVIEW_LIMIT)
 }
 
+const loadOverview = async () => {
+  const res = await fetchUploadStreamOverview()
+  overview.value = res?.data || null
+  if (res?.data?.protocol_totals) {
+    protocolTotals.value = res.data.protocol_totals
+  }
+  const latestEventTs = Number(res?.data?.summary?.latest_event_time || 0)
+  if (latestEventTs > 0) {
+    lastPushEventTime.value = latestEventTs
+  }
+  const latestReceivedRaw = String(res?.data?.summary?.latest_received_time || '')
+  const latestReceivedTs = parseCreateTimeMs(latestReceivedRaw)
+  if (latestReceivedTs > 0) {
+    lastPushReceivedTime.value = latestReceivedTs
+  }
+}
+
 const loadSnapshotOnce = async () => {
   loading.value = true
   try {
+    await loadOverview()
     const res = await fetchUploadStreamRecords({ limit: MAX_CACHE_RECORDS, offset: 0, include_payload: 0 })
-    protocolTotals.value = res?.data?.protocol_totals || protocolTotals.value
     const batch = Array.isArray(res?.data?.records) ? res.data.records : []
     records.value = batch
       .sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp)
@@ -748,12 +778,11 @@ const loadSnapshotOnce = async () => {
 
     if (records.value.length > 0) {
       const latestEventTs = records.value.reduce((maxTs, row) => Math.max(maxTs, Number(row.timestamp || 0)), 0)
-      if (latestEventTs > 0) lastPushEventTime.value = latestEventTs
+      if (latestEventTs > 0) lastPushEventTime.value = Math.max(lastPushEventTime.value || 0, latestEventTs)
       const latestReceivedTs = parseCreateTimeMs(records.value[0].create_time || '')
-      lastPushReceivedTime.value = latestReceivedTs > 0 ? latestReceivedTs : latestEventTs || Date.now()
-    } else {
-      lastPushEventTime.value = null
-      lastPushReceivedTime.value = null
+      if (latestReceivedTs > 0) {
+        lastPushReceivedTime.value = Math.max(lastPushReceivedTime.value || 0, latestReceivedTs)
+      }
     }
 
     await loadCapturePreviews()
