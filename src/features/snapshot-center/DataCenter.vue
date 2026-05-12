@@ -776,9 +776,18 @@ const updateOverviewWithIncoming = (incoming: UploadStreamRecord[]) => {
 
   const next = {
     ...overview.value,
+    protocol_totals: {
+      ...(overview.value.protocol_totals || { 101: 0, 102: 0, 103: 0 })
+    },
     summary: {
       ...overview.value.summary
     }
+  }
+
+  next.protocol_totals = {
+    101: Number(next.protocol_totals[101] || 0) + uniqueIncoming.filter((item) => item.protocol_id === 101).length,
+    102: Number(next.protocol_totals[102] || 0) + uniqueIncoming.filter((item) => item.protocol_id === 102).length,
+    103: Number(next.protocol_totals[103] || 0) + uniqueIncoming.filter((item) => item.protocol_id === 103).length
   }
 
   next.summary.total_records = Number(next.summary.total_records || 0) + uniqueIncoming.length
@@ -814,6 +823,11 @@ const updateOverviewWithIncoming = (incoming: UploadStreamRecord[]) => {
   }
 
   overview.value = next
+  protocolTotals.value = {
+    101: Number(next.protocol_totals[101] || 0),
+    102: Number(next.protocol_totals[102] || 0),
+    103: Number(next.protocol_totals[103] || 0)
+  }
 }
 
 const loadSnapshotOnce = async () => {
