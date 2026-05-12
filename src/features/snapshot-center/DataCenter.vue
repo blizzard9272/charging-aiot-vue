@@ -30,8 +30,7 @@ interface WsRecordLike {
 
 const router = useRouter()
 
-const MAX_CACHE_RECORDS = 1200
-const SNAPSHOT_BATCH_SIZE = 150
+const MAX_CACHE_RECORDS = 300
 const CAPTURE_PREVIEW_LIMIT = 8
 const WS_OPEN_TIMEOUT = 7000
 const RECONNECT_BASE_INTERVAL = 3000
@@ -739,22 +738,10 @@ const loadCapturePreviews = async () => {
 const loadSnapshotOnce = async () => {
   loading.value = true
   try {
-    const merged: UploadStreamRecord[] = []
-    let offset = 0
-    let total = 0
-
-    while (offset < MAX_CACHE_RECORDS) {
-      const res = await fetchUploadStreamRecords({ limit: SNAPSHOT_BATCH_SIZE, offset, include_payload: 0 })
-      total = Number(res?.data?.total || total || 0)
-      protocolTotals.value = res?.data?.protocol_totals || protocolTotals.value
-      const batch = Array.isArray(res?.data?.records) ? res.data.records : []
-      if (!batch.length) break
-      merged.push(...batch)
-      if ((total > 0 && merged.length >= total) || batch.length < SNAPSHOT_BATCH_SIZE) break
-      offset += batch.length
-    }
-
-    records.value = merged
+    const res = await fetchUploadStreamRecords({ limit: MAX_CACHE_RECORDS, offset: 0, include_payload: 0 })
+    protocolTotals.value = res?.data?.protocol_totals || protocolTotals.value
+    const batch = Array.isArray(res?.data?.records) ? res.data.records : []
+    records.value = batch
       .sort((a, b) => recordSortTs(b) - recordSortTs(a) || b.timestamp - a.timestamp)
       .slice(0, MAX_CACHE_RECORDS)
     snapshotRecordCount.value = records.value.length
