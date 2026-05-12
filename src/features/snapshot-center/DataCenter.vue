@@ -691,6 +691,7 @@ const connectByCandidates = (candidates: string[], index = 0) => {
       const incoming = extractRecordsFromPayload(payload)
       if (incoming.length > 0) {
         appendRecords(incoming)
+        updateOverviewWithIncoming(incoming)
         const newestEventTs = incoming.reduce((maxTs, record) => {
           return Math.max(maxTs, Number(record.timestamp || 0))
         }, 0)
@@ -763,6 +764,56 @@ const loadOverview = async () => {
   if (latestReceivedTs > 0) {
     lastPushReceivedTime.value = latestReceivedTs
   }
+}
+
+const updateOverviewWithIncoming = (incoming: UploadStreamRecord[]) => {
+  if (!incoming.length || !overview.value) return
+
+  const uniqueIncoming = incoming.filter((item, index, list) => {
+    return list.findIndex((candidate) => `${candidate.protocol_id}-${candidate.record_id}` === `${item.protocol_id}-${item.record_id}`) === index
+  })
+  if (!uniqueIncoming.length) return
+
+  const next = {
+    ...overview.value,
+    summary: {
+      ...overview.value.summary
+    }
+  }
+
+  next.summary.total_records = Number(next.summary.total_records || 0) + uniqueIncoming.length
+
+  const cameraSet = new Set(activeCameraList.value)
+  uniqueIncoming.forEach((item) => cameraSet.add(cameraText(item)))
+  next.summary.camera_count = Math.max(Number(next.summary.camera_count || 0), cameraSet.size)
+
+  const addedTargetCount = uniqueIncoming
+    .filter((item) => item.protocol_id === 101)
+    .reduce((sum, item) => sum + visualTargetCount(item.details as StreamRecord101Details), 0)
+  next.summary.target_count = Number(next.summary.target_count || 0) + addedTargetCount
+
+  const addedVectorBytes = uniqueIncoming
+    .filter((item) => item.protocol_id === 102)
+    .reduce((sum, item) => sum + Number((item.details as StreamRecord102Details).payload_size || 0), 0)
+  next.summary.vector_bytes = Number(next.summary.vector_bytes || 0) + addedVectorBytes
+
+  const addedImageSuccess = uniqueIncoming
+    .filter((item) => item.protocol_id === 103)
+    .filter((item) => (item.details as StreamRecord103Details).image_fetch_status === 'success').length
+  next.summary.image_success = Number(next.summary.image_success || 0) + addedImageSuccess
+
+  next.summary.latest_event_time = uniqueIncoming.reduce((maxTs, item) => {
+    return Math.max(maxTs, Number(item.timestamp || 0))
+  }, Number(next.summary.latest_event_time || 0))
+
+  const latestReceivedTs = uniqueIncoming.reduce((maxTs, item) => {
+    return Math.max(maxTs, parseCreateTimeMs(item.create_time || ''))
+  }, parseCreateTimeMs(String(next.summary.latest_received_time || '')))
+  if (latestReceivedTs > 0) {
+    next.summary.latest_received_time = dayjs(latestReceivedTs).format('YYYY-MM-DD HH:mm:ss')
+  }
+
+  overview.value = next
 }
 
 const loadSnapshotOnce = async () => {
