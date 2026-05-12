@@ -126,6 +126,17 @@ export interface UploadStreamRecordQuery {
   quality_status?: 'all' | 'error' | 'missing' | 'normal'
 }
 
+export interface UploadStreamAggregateQuery {
+  protocol: 101 | 102 | 103
+  camera_id?: string
+  start_event_time?: number | string
+  end_event_time?: number | string
+  event_granularity?: 'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly'
+  receive_granularity?: 'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly'
+  event_hourly_date?: string
+  receive_hourly_date?: string
+}
+
 
 export interface UploadStreamRecordListVO {
   total: number
@@ -137,6 +148,61 @@ export interface UploadStreamRecordListVO {
     missing_count: number
     missing_frames: number
   }
+}
+
+export interface UploadStreamTimelinePoint {
+  label: string
+  value: number
+}
+
+export interface UploadStreamCameraDistributionItem {
+  name: string
+  value: number
+}
+
+export interface UploadStreamAggregateQualitySummary {
+  error_count: number
+  missing_count: number
+  missing_frames: number
+}
+
+export interface UploadStreamAggregateSummary {
+  protocol_id: 101 | 102 | 103
+  total_records: number
+  batch_count: number
+  camera_count: number
+  active_days: number
+  latest_active_date: string
+  latest_event_time: number
+  latest_event_camera: string
+  earliest_event_time: number
+  earliest_event_camera: string
+  latest_received_time: string
+  latest_received_camera: string
+  latest_event_day: string
+  latest_receive_day: string
+  event_hourly_date: string
+  receive_hourly_date: string
+  keyframe_count?: number
+  target_total?: number
+  track_count?: number
+  person_total?: number
+  non_person_total?: number
+  vector_bytes?: number
+  recognized_total?: number
+  unrecognized_total?: number
+  image_bytes?: number
+  success_total?: number
+  incomplete_total?: number
+  other_abnormal_total?: number
+}
+
+export interface UploadStreamAggregateVO {
+  summary: UploadStreamAggregateSummary
+  quality_summary: UploadStreamAggregateQualitySummary
+  event_timeline: UploadStreamTimelinePoint[]
+  receive_timeline: UploadStreamTimelinePoint[]
+  camera_distribution: UploadStreamCameraDistributionItem[]
 }
 
 export interface ProtocolFrameVO {
@@ -159,6 +225,12 @@ export interface CameraOptionVO {
 
 export function fetchUploadStreamRecords(params?: UploadStreamRecordQuery) {
   return request.get<any, ApiResponse<UploadStreamRecordListVO>>('/charging-aiot-php/api/protocol-data/data-center/records.php', {
+    params
+  })
+}
+
+export function fetchUploadStreamAggregate(params: UploadStreamAggregateQuery) {
+  return request.get<any, ApiResponse<UploadStreamAggregateVO>>('/charging-aiot-php/api/protocol-data/data-center/aggregate.php', {
     params
   })
 }

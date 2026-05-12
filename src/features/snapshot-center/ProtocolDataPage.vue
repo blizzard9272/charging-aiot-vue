@@ -7,10 +7,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Histogram, PictureFilled, UserFilled, View, WarningFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
 import {
+  fetchUploadStreamAggregate,
   fetchProtocolFrame,
   fetchUploadStreamCameraOptions,
   fetchUploadStreamRecords,
   deleteProtocolMedia,
+  type UploadStreamAggregateQualitySummary,
+  type UploadStreamAggregateSummary,
+  type UploadStreamCameraDistributionItem,
+  type UploadStreamTimelinePoint,
   type CameraOptionVO,
   type StreamRecord101Details,
   type StreamRecord102Details,
@@ -34,8 +39,11 @@ const eventTimeRange = ref<[string, string] | []>([])
 const qualityFilter = ref<'all' | 'error' | 'missing' | 'normal'>('all')
 
 const aggregateLoading = ref(false)
-const aggregateRecords = ref<UploadStreamRecord[]>([])
-const aggregateTotal = ref(0)
+const aggregateSummary = ref<UploadStreamAggregateSummary | null>(null)
+const aggregateQualitySummary = ref<UploadStreamAggregateQualitySummary>({ error_count: 0, missing_count: 0, missing_frames: 0 })
+const eventTimelineRows = ref<UploadStreamTimelinePoint[]>([])
+const receiveTimelineRows = ref<UploadStreamTimelinePoint[]>([])
+const cameraDistributionRows = ref<UploadStreamCameraDistributionItem[]>([])
 
 const imageTargetsMap = ref<Map<string, StreamRecord101Details['targets']>>(new Map())
 const imageTargetsByTimestampMap = ref<Map<string, StreamRecord101Details['targets']>>(new Map())
@@ -326,7 +334,6 @@ const buildQualitySummary = (rows: UploadStreamRecord[]): QualitySummary => {
   }
 }
 
-const aggregateQuality = computed(() => buildQualitySummary(aggregateRecords.value))
 const tableQuality = computed(() => buildQualitySummary(records.value))
 
 const qualityLabel = (state: QualityState) => {
@@ -443,207 +450,86 @@ const tableRowClassName = ({ row }: { row: UploadStreamRecord }) => {
   return ''
 }
 
+const aggregateScopeHint = computed(() => '统计结果由后端聚合查询实时生成，不再把整批明细拉到浏览器计算。')
+const aggregateSummaryValue = computed<UploadStreamAggregateSummary>(() => aggregateSummary.value || {
+  protocol_id: protocol.value,
+  total_records: 0,
+  batch_count: 0,
+  camera_count: 0,
+  active_days: 0,
+  latest_active_date: '',
+  latest_event_time: 0,
+  latest_event_camera: '',
+  earliest_event_time: 0,
+  earliest_event_camera: '',
+  latest_received_time: '',
+  latest_received_camera: '',
+  latest_event_day: '',
+  latest_receive_day: '',
+  event_hourly_date: '',
+  receive_hourly_date: ''
+})
+const aggregateQualityValue = computed(() => aggregateQualitySummary.value)
+const latestEventTimelineDayText = computed(() => aggregateSummaryValue.value.latest_event_day || '--')
+const latestReceiveTimelineDayText = computed(() => aggregateSummaryValue.value.latest_receive_day || '--')
+const eventHourlyDateText = computed(() => eventHourlyDate.value || aggregateSummaryValue.value.event_hourly_date || latestEventTimelineDayText.value)
+const receiveHourlyDateText = computed(() => receiveHourlyDate.value || aggregateSummaryValue.value.receive_hourly_date || latestReceiveTimelineDayText.value)
+const stackedTimelineCharts = computed(() => eventGranularity.value === 'hourly' || receiveGranularity.value === 'hourly')
+
 const statCards = computed(() => {
-  const all = aggregateRecords.value
-  const cameraSet = new Set(all.map((item) => cameraText(item)))
-  const batchSet = new Set(all.map((item) => item.batch_id).filter(Boolean))
-  const latest = all[0]
-  const earliest = all.length ? all[all.length - 1] : null
-  const latestReceived = [...all]
-    .map((item) => ({ item, receivedTs: parseCreateTimeMs(item.create_time || '') }))
-    .filter((entry) => entry.receivedTs > 0)
-    .sort((a, b) => b.receivedTs - a.receivedTs)[0] || null
-  const activeDays = new Set(all.map((item) => dayjs(item.timestamp).format('YYYY-MM-DD')))
-  const latestActiveDate = latest ? dayjs(latest.timestamp).format('YYYY-MM-DD') : '--'
-  const avgPerBatch = batchSet.size > 0 ? Math.round(all.length / batchSet.size) : 0
-  const avgPerCamera = cameraSet.size > 0 ? Math.round(all.length / cameraSet.size) : 0
+  const summary = aggregateSummaryValue.value
+  const avgPerBatch = summary.batch_count > 0 ? Math.round(summary.total_records / summary.batch_count) : 0
+  const avgPerCamera = summary.camera_count > 0 ? Math.round(summary.total_records / summary.camera_count) : 0
+  const latestReceivedText = summary.latest_received_time ? dayjs(summary.latest_received_time).format('YYYY-MM-DD HH:mm:ss') : '--'
+  const latestEventText = formatTime(summary.latest_event_time)
+  const earliestEventText = formatTime(summary.earliest_event_time)
 
   if (protocol.value === 101) {
-    const targetTotal = all.reduce((sum, item) => sum + Number((item.details as StreamRecord101Details).count || 0), 0)
-    const personTotal = all.filter((item) => Number((item.details as StreamRecord101Details).obj_type ?? (item.details as StreamRecord101Details).targets?.[0]?.type) === 0).length
-    const trackSet = new Set(all.flatMap((item) => (item.details as StreamRecord101Details).targets.map((target) => target.tid)))
     return [
-      { label: '目标明细行数', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 101 表中的目标明细总行数，反映全量坐标记录规模；副标题展示当前分页加载到前端的数据量。' },
-      { label: '关键帧数', value: new Set(all.map((item) => buildFrameLinkKey(item))).size, sub: '按 camera+timestamp+frame_seq 去重', icon: Camera, explain: '按摄像头、事件时间和帧序号合并去重后的关键帧数量，用来衡量真实帧级事件规模。' },
-      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 统计的推送批次数，用来观察发送端批量聚合后的上传频率与规模。' },
-      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '当前统计范围内产生 101 数据的摄像头数量，副标题给出每个摄像头平均贡献的记录数。' },
-      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '按事件时间去重后的活跃日期数，适合观察该协议在更长时间范围内是否持续上报。' },
-      { label: '目标数量', value: targetTotal, sub: `轨迹 ${trackSet.size}`, icon: UserFilled, explain: '各帧内目标数累计结果，副标题中的轨迹数用于表示关联的人脸或跟踪对象规模。' },
-      { label: '人员记录', value: personTotal, sub: `非人 ${Math.max(0, aggregateTotal.value - personTotal)}`, icon: UserFilled, explain: '根据目标类型识别为“人”的记录数量，用于区分人像数据与其他类型目标。' },
-      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled, explain: '质检中判定为出错的记录数，通常表示帧结构异常、重复序号或媒体/字段异常。' },
-      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '依据同批次帧序号推断出的缺失关联记录数，副标题展示推算出的缺失帧数量。' },
-      { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台数据库最近写入该协议记录的时间，反映接收端最后一次真正收到并落库的时刻。' },
-      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备上报的最新事件时间，表示现场最新发生的协议事件，而不是平台接收时间。' },
-      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前统计区间内最早的一条事件时间，用来界定这批全量统计覆盖的起始范围。' }
+      { label: '目标明细行数', value: summary.total_records, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 101 表中的目标明细总行数，反映全量坐标记录规模；副标题展示当前分页加载到前端的数据量。' },
+      { label: '关键帧数', value: Number(summary.keyframe_count || 0), sub: '后端按 camera+timestamp+frame_seq 聚合', icon: Camera, explain: '按摄像头、事件时间和帧序号合并去重后的关键帧数量，用来衡量真实帧级事件规模。' },
+      { label: '批次数', value: summary.batch_count, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 统计的推送批次数，用来观察发送端批量聚合后的上传频率与规模。' },
+      { label: '摄像头数', value: summary.camera_count, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '当前统计范围内产生 101 数据的摄像头数量，副标题给出每个摄像头平均贡献的记录数。' },
+      { label: '活跃天数', value: summary.active_days, sub: `最近活跃日 ${summary.latest_active_date || '--'}`, icon: Histogram, explain: '按事件时间去重后的活跃日期数，适合观察该协议在更长时间范围内是否持续上报。' },
+      { label: '目标数量', value: Number(summary.target_total || 0), sub: `轨迹 ${Number(summary.track_count || 0)}`, icon: UserFilled, explain: '各帧内目标数累计结果，副标题中的轨迹数用于表示关联的人脸或跟踪对象规模。' },
+      { label: '人员记录', value: Number(summary.person_total || 0), sub: `非人 ${Number(summary.non_person_total || 0)}`, icon: UserFilled, explain: '根据目标类型识别为“人”的记录数量，用于区分人像数据与其他类型目标。' },
+      { label: '出错记录', value: aggregateQualityValue.value.error_count, sub: '后端质检', icon: WarningFilled, explain: '质检中判定为出错的记录数，通常表示帧结构异常、重复序号或媒体/字段异常。' },
+      { label: '缺失记录', value: aggregateQualityValue.value.missing_count, sub: `推算缺失帧 ${aggregateQualityValue.value.missing_frames}`, icon: WarningFilled, explain: '依据同批次帧序号推断出的缺失关联记录数，副标题展示推算出的缺失帧数量。' },
+      { label: '最近推送时间', value: latestReceivedText, sub: summary.latest_received_camera || '--', icon: protocolInfo.value.icon, explain: '平台数据库最近写入该协议记录的时间，反映接收端最后一次真正收到并落库的时刻。' },
+      { label: '最新事件时间', value: latestEventText, sub: summary.latest_event_camera || '--', icon: protocolInfo.value.icon, explain: '设备上报的最新事件时间，表示现场最新发生的协议事件，而不是平台接收时间。' },
+      { label: '最早事件时间', value: earliestEventText, sub: summary.earliest_event_camera || '--', icon: protocolInfo.value.icon, explain: '当前统计区间内最早的一条事件时间，用来界定这批统计覆盖的起始范围。' }
     ]
   }
 
   if (protocol.value === 102) {
-    const bytes = all.reduce((sum, item) => sum + Number((item.details as StreamRecord102Details).payload_size || 0), 0)
-    const recognized = all.filter((item) => Boolean((item.details as StreamRecord102Details).person_name)).length
     return [
-      { label: '总记录', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 102 协议记录总数，反映特征向量上报总规模；副标题为当前列表页已加载的记录数。' },
-      { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 聚合后的批次总量，用于判断向量上传是否集中在少量大包还是分散小包。' },
-      { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '在当前筛选范围内实际参与上传 102 数据的摄像头数量。' },
-      { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '按事件时间分布去重后的活跃日期数，可辅助判断向量数据是否连续稳定产出。' },
-      { label: '向量大小', value: formatBytes(bytes), sub: '全量累计', icon: protocolInfo.value.icon, explain: '102 协议载荷大小累计值，代表特征向量数据在当前统计范围内占用的总字节量。' },
-      { label: '人员命中', value: recognized, sub: `未命中 ${aggregateTotal.value - recognized}`, icon: UserFilled, explain: '已命中人员信息的向量记录数，通常可用于判断识别链路是否真正关联到了库中人员。' },
-      { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '结构/序列异常', icon: WarningFilled, explain: '质检中识别为结构、顺序或字段异常的 102 记录数量。' },
-      { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '通过帧序列连续性推算出的缺失记录，用于判断发送端或接收链路是否有漏报。' },
-      { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台最近成功接收到一条 102 记录并落库的时间。' },
-      { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次触发 102 协议事件的时间点。' },
-      { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前全量统计中最早的一条 102 事件时间。' }
+      { label: '总记录', value: summary.total_records, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '统计 102 协议记录总数，反映特征向量上报总规模；副标题为当前列表页已加载的记录数。' },
+      { label: '批次数', value: summary.batch_count, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按 batch_id 聚合后的批次总量，用于判断向量上传是否集中在少量大包还是分散小包。' },
+      { label: '摄像头数', value: summary.camera_count, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '在当前筛选范围内实际参与上传 102 数据的摄像头数量。' },
+      { label: '活跃天数', value: summary.active_days, sub: `最近活跃日 ${summary.latest_active_date || '--'}`, icon: Histogram, explain: '按事件时间分布去重后的活跃日期数，可辅助判断向量数据是否连续稳定产出。' },
+      { label: '向量大小', value: formatBytes(Number(summary.vector_bytes || 0)), sub: '后端累计', icon: protocolInfo.value.icon, explain: '102 协议载荷大小累计值，代表特征向量数据在当前统计范围内占用的总字节量。' },
+      { label: '人员命中', value: Number(summary.recognized_total || 0), sub: `未命中 ${Number(summary.unrecognized_total || 0)}`, icon: UserFilled, explain: '已命中人员信息的向量记录数，通常可用于判断识别链路是否真正关联到了库中人员。' },
+      { label: '出错记录', value: aggregateQualityValue.value.error_count, sub: '后端质检', icon: WarningFilled, explain: '质检中识别为结构、顺序或字段异常的 102 记录数量。' },
+      { label: '缺失记录', value: aggregateQualityValue.value.missing_count, sub: `推算缺失帧 ${aggregateQualityValue.value.missing_frames}`, icon: WarningFilled, explain: '通过帧序列连续性推算出的缺失记录，用于判断发送端或接收链路是否有漏报。' },
+      { label: '最近推送时间', value: latestReceivedText, sub: summary.latest_received_camera || '--', icon: protocolInfo.value.icon, explain: '平台最近成功接收到一条 102 记录并落库的时间。' },
+      { label: '最新事件时间', value: latestEventText, sub: summary.latest_event_camera || '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次触发 102 协议事件的时间点。' },
+      { label: '最早事件时间', value: earliestEventText, sub: summary.earliest_event_camera || '--', icon: protocolInfo.value.icon, explain: '当前统计覆盖中最早的一条 102 事件时间。' }
     ]
   }
 
-  const imageBytes = all.reduce((sum, item) => sum + Number((item.details as StreamRecord103Details).payload_size || 0), 0)
-  const success = all.filter((item) => (item.details as StreamRecord103Details).image_fetch_status === 'success').length
-  const incomplete = all.filter((item) => (item.details as StreamRecord103Details).image_fetch_status === 'incomplete').length
   return [
-    { label: '媒体记录数', value: aggregateTotal.value, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '103 协议媒体记录总数，表示图片或视频抓拍事件在当前统计范围内的规模。' },
-    { label: '批次数', value: batchSet.size, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按发送批次聚合后的媒体上传次数，用于观察抓拍文件在发送端的打包与推送节奏。' },
-    { label: '摄像头数', value: cameraSet.size, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '实际产生媒体抓拍数据的摄像头数量。' },
-    { label: '活跃天数', value: activeDays.size, sub: `最近活跃日 ${latestActiveDate}`, icon: Histogram, explain: '媒体事件涉及的活跃日期数，用于判断抓拍数据的持续覆盖范围。' },
-    { label: '媒体大小', value: formatBytes(imageBytes), sub: '全量累计', icon: protocolInfo.value.icon, explain: '当前统计范围内媒体载荷大小累计值，反映图片/视频传输的总体体量。' },
-    { label: '媒体就绪', value: success, sub: `不完整 ${incomplete}，其他异常 ${Math.max(0, aggregateTotal.value - success - incomplete)}`, icon: PictureFilled, explain: '状态为 success 的媒体记录数量；副标题同时给出不完整媒体和其他异常媒体的数量。' },
-    { label: '出错记录', value: aggregateQuality.value.errorCount, sub: '含媒体落盘/读取异常', icon: WarningFilled, explain: '媒体落盘、拼接、读取或结构解析异常的记录数。' },
-    { label: '缺失记录', value: aggregateQuality.value.missingCount, sub: `推算缺失帧 ${aggregateQuality.value.missingFrames}`, icon: WarningFilled, explain: '通过帧序或分片关联推断出的缺失记录数，适合定位上传过程中的漏片或漏报。' },
-    { label: '最近推送时间', value: latestReceived ? dayjs(latestReceived.receivedTs).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latestReceived ? cameraText(latestReceived.item) : '--', icon: protocolInfo.value.icon, explain: '平台最近接收到并写入一条 103 记录的时间。' },
-    { label: '最新事件时间', value: latest ? dayjs(latest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: latest ? cameraText(latest) : '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次产生媒体抓拍事件的时间。' },
-    { label: '最早事件时间', value: earliest ? dayjs(earliest.timestamp).format('YYYY-MM-DD HH:mm:ss') : '--', sub: earliest ? cameraText(earliest) : '--', icon: protocolInfo.value.icon, explain: '当前全量媒体统计中最早的一次事件时间。' }
+    { label: '媒体记录数', value: summary.total_records, sub: `当前页 ${records.value.length}`, icon: Histogram, explain: '103 协议媒体记录总数，表示图片或视频抓拍事件在当前统计范围内的规模。' },
+    { label: '批次数', value: summary.batch_count, sub: `均值 ${avgPerBatch}/批`, icon: Camera, explain: '按发送批次聚合后的媒体上传次数，用于观察抓拍文件在发送端的打包与推送节奏。' },
+    { label: '摄像头数', value: summary.camera_count, sub: `均值 ${avgPerCamera}/摄像头`, icon: Camera, explain: '实际产生媒体抓拍数据的摄像头数量。' },
+    { label: '活跃天数', value: summary.active_days, sub: `最近活跃日 ${summary.latest_active_date || '--'}`, icon: Histogram, explain: '媒体事件涉及的活跃日期数，用于判断抓拍数据的持续覆盖范围。' },
+    { label: '媒体大小', value: formatBytes(Number(summary.image_bytes || 0)), sub: '后端累计', icon: protocolInfo.value.icon, explain: '当前统计范围内媒体载荷大小累计值，反映图片/视频传输的总体体量。' },
+    { label: '媒体就绪', value: Number(summary.success_total || 0), sub: `不完整 ${Number(summary.incomplete_total || 0)}，其他异常 ${Number(summary.other_abnormal_total || 0)}`, icon: PictureFilled, explain: '状态为 success 的媒体记录数量；副标题同时给出不完整媒体和其他异常媒体的数量。' },
+    { label: '出错记录', value: aggregateQualityValue.value.error_count, sub: '含媒体落盘/读取异常', icon: WarningFilled, explain: '媒体落盘、拼接、读取或结构解析异常的记录数。' },
+    { label: '缺失记录', value: aggregateQualityValue.value.missing_count, sub: `推算缺失帧 ${aggregateQualityValue.value.missing_frames}`, icon: WarningFilled, explain: '通过帧序或分片关联推断出的缺失记录数，适合定位上传过程中的漏片或漏报。' },
+    { label: '最近推送时间', value: latestReceivedText, sub: summary.latest_received_camera || '--', icon: protocolInfo.value.icon, explain: '平台最近接收到并写入一条 103 记录的时间。' },
+    { label: '最新事件时间', value: latestEventText, sub: summary.latest_event_camera || '--', icon: protocolInfo.value.icon, explain: '设备侧最近一次产生媒体抓拍事件的时间。' },
+    { label: '最早事件时间', value: earliestEventText, sub: summary.earliest_event_camera || '--', icon: protocolInfo.value.icon, explain: '当前统计覆盖中最早的一次事件时间。' }
   ]
-})
-
-const buildTimeBucket = (timestamp: number, granularity: 'year' | 'quarter' | 'month' | 'week' | 'day') => {
-  const source = dayjs(timestamp)
-  if (!source.isValid()) return null
-  if (granularity === 'year') {
-    return { sort: source.startOf('year').valueOf(), label: source.format('YYYY年') }
-  }
-  if (granularity === 'quarter') {
-    const quarter = Math.floor(source.month() / 3) + 1
-    const startMonth = (quarter - 1) * 3
-    return { sort: source.month(startMonth).startOf('month').valueOf(), label: `${source.format('YYYY')} Q${quarter}` }
-  }
-  if (granularity === 'month') {
-    return { sort: source.startOf('month').valueOf(), label: source.format('YYYY-MM') }
-  }
-  if (granularity === 'week') {
-    const start = source.startOf('week')
-    return { sort: start.valueOf(), label: `${start.format('YYYY-MM-DD')}周` }
-  }
-  return { sort: source.startOf('day').valueOf(), label: source.format('YYYY-MM-DD') }
-}
-
-const aggregateTimeline = (
-  rows: UploadStreamRecord[],
-  timestampGetter: (row: UploadStreamRecord) => number,
-  granularity: 'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly',
-  hourlyDate = ''
-) => {
-  if (granularity === 'hourly') {
-    const timedRows = rows
-      .map((item) => ({ item, ts: timestampGetter(item) }))
-      .filter((entry) => Number.isFinite(entry.ts) && entry.ts > 0)
-    if (!timedRows.length) return []
-
-    const selectedBase = hourlyDate ? dayjs(hourlyDate) : dayjs(Math.max(...timedRows.map((entry) => entry.ts)))
-    const dayStart = selectedBase.startOf('day')
-    const dayEnd = dayStart.add(1, 'day')
-    const bucketMap = new Map<string, { sort: number; label: string; value: number }>()
-
-    for (let hour = 0; hour < 24; hour += 1) {
-      const bucketStart = dayStart.add(hour, 'hour')
-      const bucketEnd = bucketStart.add(1, 'hour')
-      const label = `${bucketStart.format('HH:mm')}-${bucketEnd.format('HH:mm')}`
-      bucketMap.set(label, {
-        sort: bucketStart.valueOf(),
-        label,
-        value: 0
-      })
-    }
-
-    timedRows.forEach(({ ts }) => {
-      const point = dayjs(ts)
-      if (point.valueOf() < dayStart.valueOf() || point.valueOf() >= dayEnd.valueOf()) return
-      const bucketStart = dayStart.add(point.hour(), 'hour')
-      const bucketEnd = bucketStart.add(1, 'hour')
-      const label = `${bucketStart.format('HH:mm')}-${bucketEnd.format('HH:mm')}`
-      const current = bucketMap.get(label)
-      if (current) {
-        current.value += 1
-      }
-    })
-
-    return [...bucketMap.values()]
-      .sort((a, b) => a.sort - b.sort)
-      .map((item) => [item.label, item.value] as [string, number])
-  }
-
-  const map = new Map<string, { sort: number; label: string; value: number }>()
-  rows.forEach((item) => {
-    const ts = timestampGetter(item)
-    if (!Number.isFinite(ts) || ts <= 0) return
-    const bucket = buildTimeBucket(ts, granularity)
-    if (!bucket) return
-    const current = map.get(bucket.label)
-    if (current) {
-      current.value += 1
-    } else {
-      map.set(bucket.label, { ...bucket, value: 1 })
-    }
-  })
-  return [...map.values()]
-    .sort((a, b) => a.sort - b.sort)
-    .map((item) => [item.label, item.value] as [string, number])
-}
-
-const eventTimelineData = computed(() => {
-  return aggregateTimeline(
-    aggregateRecords.value,
-    (item) => Number(item.timestamp || 0),
-    eventGranularity.value,
-    eventHourlyDate.value
-  )
-})
-
-const receiveTimelineData = computed(() => {
-  return aggregateTimeline(
-    aggregateRecords.value,
-    (item) => parseCreateTimeMs(item.create_time || ''),
-    receiveGranularity.value,
-    receiveHourlyDate.value
-  )
-})
-
-const latestEventTimelineDayText = computed(() => {
-  const timestamps = aggregateRecords.value.map((item) => Number(item.timestamp || 0)).filter((item) => Number.isFinite(item) && item > 0)
-  if (!timestamps.length) return '--'
-  return dayjs(Math.max(...timestamps)).format('YYYY-MM-DD')
-})
-
-const latestReceiveTimelineDayText = computed(() => {
-  const timestamps = aggregateRecords.value
-    .map((item) => parseCreateTimeMs(item.create_time || ''))
-    .filter((item) => Number.isFinite(item) && item > 0)
-  if (!timestamps.length) return '--'
-  return dayjs(Math.max(...timestamps)).format('YYYY-MM-DD')
-})
-
-const eventHourlyDateText = computed(() => eventHourlyDate.value || latestEventTimelineDayText.value)
-const receiveHourlyDateText = computed(() => receiveHourlyDate.value || latestReceiveTimelineDayText.value)
-const stackedTimelineCharts = computed(() => eventGranularity.value === 'hourly' || receiveGranularity.value === 'hourly')
-
-const cameraDistributionData = computed(() => {
-  const map = new Map<string, number>()
-  aggregateRecords.value.forEach((item) => {
-    const key = cameraText(item)
-    map.set(key, (map.get(key) || 0) + 1)
-  })
-  return [...map.entries()]
-    .map(([name, value]) => ({ name, value }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 12)
 })
 
 const row101VisualTargets = (row: UploadStreamRecord) => {
@@ -738,14 +624,14 @@ const renderCharts = async () => {
   await nextTick()
   if (trendChartRef.value) {
     trendChart = trendChart || echarts.init(trendChartRef.value)
-    const eventRows = eventTimelineData.value.length ? eventTimelineData.value : [['暂无数据', 0] as [string, number]]
-    const eventValues = eventRows.map(([, count]) => count)
+    const eventRows = eventTimelineRows.value.length ? eventTimelineRows.value : [{ label: '暂无数据', value: 0 }]
+    const eventValues = eventRows.map((item) => item.value)
     trendChart.setOption({
       grid: { left: 44, right: 20, top: 22, bottom: 42 },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       xAxis: {
         type: 'category',
-        data: eventRows.map(([date]) => date),
+        data: eventRows.map((item) => item.label),
         axisLine: { lineStyle: { color: '#8ba6d6' } },
         axisLabel: { color: '#557099', interval: 0, rotate: eventRows.length > 10 ? 25 : 0 }
       },
@@ -783,14 +669,14 @@ const renderCharts = async () => {
   }
   if (categoryChartRef.value) {
     categoryChart = categoryChart || echarts.init(categoryChartRef.value)
-    const receiveRows = receiveTimelineData.value.length ? receiveTimelineData.value : [['暂无数据', 0] as [string, number]]
-    const receiveValues = receiveRows.map(([, value]) => value)
+    const receiveRows = receiveTimelineRows.value.length ? receiveTimelineRows.value : [{ label: '暂无数据', value: 0 }]
+    const receiveValues = receiveRows.map((item) => item.value)
     categoryChart.setOption({
       grid: { left: 44, right: 20, top: 22, bottom: 56 },
       tooltip: { trigger: 'axis' },
       xAxis: {
         type: 'category',
-        data: receiveRows.map(([time]) => time),
+        data: receiveRows.map((item) => item.label),
         axisLine: { lineStyle: { color: '#8ba6d6' } },
         axisLabel: { color: '#557099', interval: 0, rotate: receiveRows.length > 10 ? 25 : 0 }
       },
@@ -817,7 +703,7 @@ const renderCharts = async () => {
   }
   if (cameraChartRef.value) {
     cameraChart = cameraChart || echarts.init(cameraChartRef.value)
-    const cameraRows = cameraDistributionData.value.length ? cameraDistributionData.value : [{ name: '暂无数据', value: 0 }]
+    const cameraRows = cameraDistributionRows.value.length ? cameraDistributionRows.value : [{ name: '暂无数据', value: 0 }]
     cameraChart.setOption({
       grid: { left: 110, right: 32, top: 24, bottom: 24 },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
@@ -851,30 +737,25 @@ const renderCharts = async () => {
 const loadAggregateData = async () => {
   aggregateLoading.value = true
   try {
-    const merged: UploadStreamRecord[] = []
-    let offset = 0
-    let queryTotal = 0
-    const chunk = protocol.value === 103 ? 200 : 500
-
-    while (offset < 100000) {
-      const res = await fetchUploadStreamRecords({
-        protocol: protocol.value,
-        limit: chunk,
-        offset,
-        include_payload: 0
-      })
-      queryTotal = Number(res.data.total || queryTotal || 0)
-      const batch = Array.isArray(res.data.records) ? res.data.records : []
-      if (!batch.length) break
-      merged.push(...batch)
-      if ((queryTotal > 0 && merged.length >= queryTotal) || batch.length < chunk) break
-      offset += batch.length
-    }
-
-    aggregateTotal.value = queryTotal
-    aggregateRecords.value = merged
+    const startEventTime = eventTimeRange.value.length === 2 ? Number(eventTimeRange.value[0]) : undefined
+    const endEventTime = eventTimeRange.value.length === 2 ? Number(eventTimeRange.value[1]) : undefined
+    const res = await fetchUploadStreamAggregate({
+      protocol: protocol.value,
+      camera_id: cameraId.value.trim() || undefined,
+      start_event_time: startEventTime,
+      end_event_time: endEventTime,
+      event_granularity: eventGranularity.value,
+      receive_granularity: receiveGranularity.value,
+      event_hourly_date: eventGranularity.value === 'hourly' ? (eventHourlyDate.value || undefined) : undefined,
+      receive_hourly_date: receiveGranularity.value === 'hourly' ? (receiveHourlyDate.value || undefined) : undefined
+    })
+    aggregateSummary.value = res.data.summary || null
+    aggregateQualitySummary.value = res.data.quality_summary || { error_count: 0, missing_count: 0, missing_frames: 0 }
+    eventTimelineRows.value = Array.isArray(res.data.event_timeline) ? res.data.event_timeline : []
+    receiveTimelineRows.value = Array.isArray(res.data.receive_timeline) ? res.data.receive_timeline : []
+    cameraDistributionRows.value = Array.isArray(res.data.camera_distribution) ? res.data.camera_distribution : []
   } catch (_error) {
-    ElMessage.error('全量统计加载失败')
+    ElMessage.error('聚合统计加载失败')
   } finally {
     aggregateLoading.value = false
   }
@@ -984,7 +865,8 @@ const resetAndReloadAll = async () => {
 
 const resetAndReloadTable = async () => {
   page.value = 1
-  await loadTableData()
+  await Promise.all([loadAggregateData(), loadTableData()])
+  await renderCharts()
 }
 
 const loadCameraOptions = async () => {
@@ -1008,25 +890,14 @@ watch([page, pageSize], async () => {
   await loadTableData()
 })
 
-watch(aggregateRecords, async () => {
-  if (!eventHourlyDate.value && latestEventTimelineDayText.value !== '--') {
-    eventHourlyDate.value = latestEventTimelineDayText.value
-  }
-  if (!receiveHourlyDate.value && latestReceiveTimelineDayText.value !== '--') {
-    receiveHourlyDate.value = latestReceiveTimelineDayText.value
-  }
-  await renderCharts()
-}, { deep: true })
-
 watch([eventGranularity, receiveGranularity, eventHourlyDate, receiveHourlyDate], async () => {
+  await loadAggregateData()
   await renderCharts()
 })
 
 onMounted(async () => {
   await loadCameraOptions()
   await resetAndReloadAll()
-  eventHourlyDate.value = latestEventTimelineDayText.value !== '--' ? latestEventTimelineDayText.value : ''
-  receiveHourlyDate.value = latestReceiveTimelineDayText.value !== '--' ? latestReceiveTimelineDayText.value : ''
   if ('ResizeObserver' in window) {
     resizeObserver = new ResizeObserver(() => {
       trendChart?.resize()
@@ -1080,7 +951,7 @@ onUnmounted(() => {
             <div class="chart-header">
               <div class="chart-header-copy">
                 <span>按事件时间统计</span>
-                <small>{{ eventGranularity === 'hourly' ? `展示 ${eventHourlyDateText} 当天每小时事件流量` : '按设备事件发生时间聚合记录量' }}</small>
+                <small>{{ eventGranularity === 'hourly' ? `展示 ${eventHourlyDateText} 当天每小时事件流量` : '按设备事件发生时间聚合记录量' }} · {{ aggregateScopeHint }}</small>
               </div>
               <el-radio-group v-model="eventGranularity" size="small">
                 <el-radio-button label="year">年</el-radio-button>
@@ -1110,7 +981,7 @@ onUnmounted(() => {
             <div class="chart-header">
               <div class="chart-header-copy">
                 <span>按接收时间统计</span>
-                <small>{{ receiveGranularity === 'hourly' ? `展示 ${receiveHourlyDateText} 当天每小时接收流量` : '按平台写库时间观察接收节奏' }}</small>
+                <small>{{ receiveGranularity === 'hourly' ? `展示 ${receiveHourlyDateText} 当天每小时接收流量` : '按平台写库时间观察接收节奏' }} · {{ aggregateScopeHint }}</small>
               </div>
               <el-radio-group v-model="receiveGranularity" size="small">
                 <el-radio-button label="year">年</el-radio-button>
@@ -1138,8 +1009,8 @@ onUnmounted(() => {
     <el-card shadow="never" class="panel-card camera-chart-card">
       <template #header>
         <div class="chart-header-copy">
-          <span>按摄像头归类统计（全量）</span>
-          <small>展示记录量最高的前 12 个摄像头</small>
+          <span>按摄像头归类统计</span>
+          <small>{{ aggregateScopeHint }} 展示记录量最高的前 12 个摄像头</small>
         </div>
       </template>
       <div ref="cameraChartRef" class="camera-chart"></div>
