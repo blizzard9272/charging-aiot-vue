@@ -2,10 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import dayjs from 'dayjs'
-import * as echarts from 'echarts'
+import type { ECharts } from 'echarts'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Camera, Histogram, PictureFilled, UserFilled, View, WarningFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
+import { loadEcharts } from '@/utils/echarts'
 import {
   fetchUploadStreamAggregate,
   fetchProtocolFrame,
@@ -58,10 +59,16 @@ const eventGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day' | 'ho
 const receiveGranularity = ref<'year' | 'quarter' | 'month' | 'week' | 'day' | 'hourly'>('day')
 const eventHourlyDate = ref('')
 const receiveHourlyDate = ref('')
-let trendChart: echarts.ECharts | null = null
-let categoryChart: echarts.ECharts | null = null
-let cameraChart: echarts.ECharts | null = null
+let trendChart: ECharts | null = null
+let categoryChart: ECharts | null = null
+let cameraChart: ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
+let echartsModulePromise: ReturnType<typeof loadEcharts> | null = null
+
+const getEcharts = () => {
+  echartsModulePromise = echartsModulePromise || loadEcharts()
+  return echartsModulePromise
+}
 
 const frameDialogVisible = ref(false)
 const frameDialogLoading = ref(false)
@@ -622,6 +629,7 @@ const deleteMediaRow = async (row: UploadStreamRecord) => {
 
 const renderCharts = async () => {
   await nextTick()
+  const echarts = await getEcharts()
   if (trendChartRef.value) {
     trendChart = trendChart || echarts.init(trendChartRef.value)
     const eventRows = eventTimelineRows.value.length ? eventTimelineRows.value : [{ label: '暂无数据', value: 0 }]
@@ -896,6 +904,7 @@ watch([eventGranularity, receiveGranularity, eventHourlyDate, receiveHourlyDate]
 })
 
 onMounted(async () => {
+  void getEcharts()
   await loadCameraOptions()
   await resetAndReloadAll()
   if ('ResizeObserver' in window) {

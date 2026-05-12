@@ -1,10 +1,11 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import dayjs from 'dayjs'
-import * as echarts from 'echarts'
+import type { ECharts } from 'echarts'
 import { ElMessage } from 'element-plus'
 import { Camera, Link, PictureFilled, UserFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
+import { loadEcharts } from '@/utils/echarts'
 import {
   fetchUploadStreamRecords,
   type StreamRecord101Details,
@@ -60,8 +61,14 @@ let reconnectTimer: number | null = null
 let manualClose = false
 let reconnectAttempt = 0
 
-let ratioChart: echarts.ECharts | null = null
+let ratioChart: ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
+let echartsModulePromise: ReturnType<typeof loadEcharts> | null = null
+
+const getEcharts = () => {
+  echartsModulePromise = echartsModulePromise || loadEcharts()
+  return echartsModulePromise
+}
 
 const list101 = computed(() => records.value.filter((item) => item.protocol_id === 101).slice(0, 14))
 const list102 = computed(() => records.value.filter((item) => item.protocol_id === 102).slice(0, 14))
@@ -697,14 +704,15 @@ const buildRatioData = () => {
   return result
 }
 
-const ensureCharts = () => {
+const ensureCharts = async () => {
+  const echarts = await getEcharts()
   if (ratioChartRef.value && !ratioChart) {
     ratioChart = echarts.init(ratioChartRef.value)
   }
 }
 
-const renderCharts = () => {
-  ensureCharts()
+const renderCharts = async () => {
+  await ensureCharts()
 
   ratioChart?.setOption({
     tooltip: {
@@ -754,7 +762,7 @@ const resizeCharts = () => {
 
 watch(records, async () => {
   await nextTick()
-  renderCharts()
+  await renderCharts()
 })
 
 watch(imageDialogVisible, (visible) => {
@@ -767,7 +775,8 @@ watch(imageDialogVisible, (visible) => {
 onMounted(async () => {
   await loadSnapshotOnce()
   await nextTick()
-  renderCharts()
+  void getEcharts()
+  await renderCharts()
   connectWs()
 
   if ('ResizeObserver' in window) {

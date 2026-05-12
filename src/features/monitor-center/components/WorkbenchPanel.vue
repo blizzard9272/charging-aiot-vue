@@ -1,6 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
-import * as echarts from 'echarts'
+import type { ECharts } from 'echarts'
 import {
   CollectionTag,
   Monitor,
@@ -11,15 +11,22 @@ import {
 import { getMediaMtxHealth, getMonitorList, getWorkbenchAudit } from '@/api/device'
 import type { MediaMtxHealthResult, WorkbenchAuditLog } from '@/api/device'
 import type { CameraDeviceVO, DeviceQueryParams } from '@/shared/types/monitor-center'
+import { loadEcharts } from '@/utils/echarts'
 
 const loading = ref(false)
 const chartLoading = ref(false)
 const chartRef = ref<HTMLDivElement | null>(null)
 const secondChartRef = ref<HTMLDivElement | null>(null)
-let actionChart: echarts.ECharts | null = null
-let errorChart: echarts.ECharts | null = null
+let actionChart: ECharts | null = null
+let errorChart: ECharts | null = null
 let chartResizeObserver: ResizeObserver | null = null
 let secondChartResizeObserver: ResizeObserver | null = null
+let echartsModulePromise: ReturnType<typeof loadEcharts> | null = null
+
+const getEcharts = () => {
+  echartsModulePromise = echartsModulePromise || loadEcharts()
+  return echartsModulePromise
+}
 
 const deviceList = ref<CameraDeviceVO[]>([])
 const total = ref(0)
@@ -270,7 +277,8 @@ const fetchDeviceList = async () => {
   }
 }
 
-const updateActionChart = () => {
+const updateActionChart = async () => {
+  await getEcharts()
   if (!actionChart) return
 
   const values = [
@@ -307,7 +315,8 @@ const updateActionChart = () => {
   })
 }
 
-const updateErrorChart = () => {
+const updateErrorChart = async () => {
+  const echarts = await getEcharts()
   if (!errorChart) return
   errorChart.setOption({
     tooltip: { trigger: 'axis' },
@@ -366,8 +375,8 @@ const fetchAuditStats = async () => {
     }
   } finally {
     chartLoading.value = false
-    updateActionChart()
-    updateErrorChart()
+    void updateActionChart()
+    void updateErrorChart()
   }
 }
 
@@ -383,6 +392,7 @@ const fetchMediaMtxHealth = async () => {
 const initChart = async () => {
   await nextTick()
   if (!chartRef.value || !secondChartRef.value) return
+  const echarts = await getEcharts()
   if (actionChart) {
     actionChart.dispose()
   }
@@ -413,8 +423,8 @@ const initChart = async () => {
     secondChartResizeObserver.observe(secondChartRef.value)
   }
 
-  updateActionChart()
-  updateErrorChart()
+  void updateActionChart()
+  void updateErrorChart()
 }
 
 const handleResize = () => {
@@ -426,6 +436,7 @@ const handleExternalSyncFinished = async () => {
 }
 
 onMounted(async () => {
+  void getEcharts()
   await Promise.all([fetchDeviceList(), fetchAuditStats(), fetchMediaMtxHealth()])
   await initChart()
   healthTimer = window.setInterval(() => {

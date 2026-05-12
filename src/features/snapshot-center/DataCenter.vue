@@ -2,10 +2,11 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
-import * as echarts from 'echarts'
+import type { ECharts } from 'echarts'
 import { ElMessage } from 'element-plus'
 import { Connection, DataLine, PictureFilled, UserFilled } from '@element-plus/icons-vue'
 import CanvasDetectionImage from '@/shared/components/CanvasDetectionImage.vue'
+import { loadEcharts } from '@/utils/echarts'
 import {
   fetchUploadStreamOverview,
   fetchUploadStreamRecords,
@@ -55,8 +56,8 @@ const linkMode = ref<'strict' | 'loose'>('strict')
 const protocolChartRef = ref<HTMLDivElement>()
 const relationChartRef = ref<HTMLDivElement>()
 
-let protocolChart: echarts.ECharts | null = null
-let relationChart: echarts.ECharts | null = null
+let protocolChart: ECharts | null = null
+let relationChart: ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
 let ws: WebSocket | null = null
 let reconnectTimer: number | null = null
@@ -64,6 +65,12 @@ let manualClose = false
 let reconnectAttempt = 0
 let disconnectedNotified = false
 let chartRenderQueued = false
+let echartsModulePromise: ReturnType<typeof loadEcharts> | null = null
+
+const getEcharts = () => {
+  echartsModulePromise = echartsModulePromise || loadEcharts()
+  return echartsModulePromise
+}
 
 const parseCreateTimeMs = (createTime: string) => {
   if (!createTime) return 0
@@ -869,6 +876,7 @@ const queueRenderCharts = () => {
 
 const renderCharts = async () => {
   await nextTick()
+  const echarts = await getEcharts()
 
   if (protocolChartRef.value) {
     protocolChart = protocolChart || echarts.init(protocolChartRef.value)
@@ -953,6 +961,7 @@ watch(
 
 onMounted(async () => {
   await loadSnapshotOnce()
+  void getEcharts()
   queueRenderCharts()
   connectWs()
 
